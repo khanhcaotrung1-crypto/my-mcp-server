@@ -195,3 +195,26 @@ async def mcp_message(session_id: str, request: Request):
 @app.post("/message/{session_id}")
 async def root_message(session_id: str, request: Request):
     return await mcp_message(session_id, request)
+from urllib.parse import unquote
+
+@app.post("/{weird:path}")
+async def rikkahub_weird_endpoint_fix(weird: str, request: Request):
+    # Railway/HTTP logs 里看到的： /{"uri": "message/<id>"}
+    decoded = unquote(weird)
+
+    # 只处理这种 JSON 形态的“奇葩路径”
+    if not decoded.lstrip().startswith('{"uri"'):
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    try:
+        obj = json.loads(decoded)
+        uri = obj.get("uri", "")
+    except Exception:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    # uri 可能是 "message/<id>" 或 "/mcp/message/<id>"
+    if "message/" not in uri:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    session_id = uri.split("message/", 1)[1].split("/", 1)[0]
+    return await mcp_message(session_id, request)
