@@ -84,7 +84,25 @@ def health():
         "supabase_configured": bool(SUPABASE_URL and SUPABASE_KEY),
         "glm_embedding_ready": bool(oai),
     }
+@app.post("/mcp")
+async def mcp_initialize(request: Request):
+    payload = await request.json()
+    _id = payload.get("id")
 
+    return {
+        "jsonrpc": "2.0",
+        "id": _id,
+        "result": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {
+                "tools": {}
+            },
+            "serverInfo": {
+                "name": "rikka-memory",
+                "version": "0.1.0"
+            }
+        }
+    }
 def sse_data(data) -> str:
     if isinstance(data, str):
         payload = data
