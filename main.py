@@ -11,6 +11,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="RikkaHub MCP Server")
 
+@app.post("/mcp/{rest_of_path:path}")
+async def mcp_fallback(rest_of_path: str, request: Request):
+    # 只处理 message/<id>
+    if not rest_of_path.startswith("message/"):
+        raise HTTPException(status_code=404, detail="Not Found")
+    session_id = rest_of_path.split("/", 1)[1]
+    return await mcp_message(session_id, request)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -77,7 +84,7 @@ def sse(event: str, data: Any) -> str:
 
 async def sse_stream(session_id: str):
     # 立刻发 endpoint，RikkaHub 就靠这个完成握手
-    yield sse("endpoint", {"uri": f"/mcp/message/{session_id}"})
+    yield sse("endpoint", {"uri": f"message/{session_id}"})
     yield sse("ready", {"ok": True})
 
     q = SESSIONS[session_id]
