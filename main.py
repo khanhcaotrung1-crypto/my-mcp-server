@@ -188,3 +188,7 @@ async def mcp_message(session_id: str, request: Request):
     # 按 SSE transport 习惯：HTTP 端返回 202，真正响应走 SSE message 推回去
     await SESSIONS[session_id].put(resp)
     return JSONResponse({"ok": True}, status_code=202)
+
+@app.post("/message/{session_id}")
+async def root_message(session_id: str, request: Request):
+    return await mcp_message(session_id, request)
