@@ -14,7 +14,32 @@ from typing import Dict, List, Any
 import httpx
 
 app = FastAPI(title="RikkaHub MCP Server")
+ from fastapi.responses import StreamingResponse
+import asyncio, json
 
+TOOLS = [
+    {"name": "save_memory", "description": "保存一条记忆到数据库", "input_schema": {"type":"object","properties":{"title":{"type":"string"},"content":{"type":"string"},"category":{"type":"string"},"importance":{"type":"integer"}}, "required":["title","content"]}},
+    {"name": "search_memory", "description": "搜索相关的记忆", "input_schema": {"type":"object","properties":{"query":{"type":"string"}}, "required":["query"]}},
+    {"name": "get_recent_memories", "description": "获取最近的记忆", "input_schema": {"type":"object","properties":{"limit":{"type":"integer"}}}},
+]
+
+async def event_stream():
+    yield f"data: {json.dumps({'type': 'init', 'tools': TOOLS})}\n\n"
+    while True:
+        await asyncio.sleep(10)
+        yield f"data: {json.dumps({'type': 'ping'})}\n\n"
+
+@app.get("/mcp")
+async def mcp():
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
 # 允许跨域
 app.add_middleware(
     CORSMiddleware,
