@@ -1,50 +1,16 @@
-print("BOOT: LOADED main.py v2026-02-20-1609")
-"""
-RikkaHub MCP Server
-一个简单的 MCP 服务器，提供记忆管理和搜索功能
-"""
-
-from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse, JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
 import os
 import json
 import asyncio
+import uuid
 from datetime import datetime
-from typing import Dict, List, Any
-import httpx
+from typing import Any, Dict
+
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="RikkaHub MCP Server")
-@app.get("/__whoami")
-def whoami():
-    return {"service": "my-mcp-server", "version": "v1-mcp-route-test"}
-from fastapi.responses import StreamingResponse
-import asyncio, json
 
-TOOLS = [
-    {"name": "save_memory", "description": "保存一条记忆到数据库", "input_schema": {"type":"object","properties":{"title":{"type":"string"},"content":{"type":"string"},"category":{"type":"string"},"importance":{"type":"integer"}}, "required":["title","content"]}},
-    {"name": "search_memory", "description": "搜索相关的记忆", "input_schema": {"type":"object","properties":{"query":{"type":"string"}}, "required":["query"]}},
-    {"name": "get_recent_memories", "description": "获取最近的记忆", "input_schema": {"type":"object","properties":{"limit":{"type":"integer"}}}},
-]
-
-async def event_stream():
-    yield f"data: {json.dumps({'type': 'init', 'tools': TOOLS})}\n\n"
-    while True:
-        await asyncio.sleep(10)
-        yield f"data: {json.dumps({'type': 'ping'})}\n\n"
-
-@app.get("/mcp")
-async def mcp():
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        }
-    )
-# 允许跨域
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -53,13 +19,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 环境变量
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# MCP 工具定义
 TOOLS = [
     {
         "name": "save_memory",
@@ -67,171 +29,155 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "title": {"type": "string", "description": "记忆标题"},
-                "content": {"type": "string", "description": "记忆内容"},
-                "category": {"type": "string", "description": "分类（可选）"},
-                "importance": {"type": "integer", "description": "重要性 1-5（可选）"}
+                "title": {"type": "string"},
+                "content": {"type": "string"},
+                "category": {"type": "string"},
+                "importance": {"type": "integer"},
             },
-            "required": ["title", "content"]
-        }
+            "required": ["title", "content"],
+        },
     },
     {
         "name": "search_memory",
         "description": "搜索相关的记忆",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "搜索关键词"}
-            },
-            "required": ["query"]
-        }
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
     },
     {
         "name": "get_recent_memories",
         "description": "获取最近的记忆",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "limit": {"type": "integer", "description": "返回数量，默认10"}
-            }
-        }
-    }
+        "input_schema": {"type": "object", "properties": {"limit": {"type": "integer"}}},
+    },
 ]
 
-async def save_memory_to_supabase(title: str, content: str, category: str = None, importance: int = 3):
-    """保存记忆到 Supabase"""
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            f"{SUPABASE_URL}/rest/v1/memories",
-            headers={
-                "apikey": SUPABASE_KEY,
-                "Authorization": f"Bearer {SUPABASE_KEY}",
-                "Content-Type": "application/json",
-                "Prefer": "return=representation"
-            },
-            json={
-                "title": title,
-                "content": content,
-                "category": category,
-                "importance": importance,
-                "created_at": datetime.now().isoformat()
-            }
-        )
-        return response.json()
+# 每个 SSE 连接一个队列，用来推送 JSON-RPC 响应
+SESSIONS: Dict[str, "asyncio.Queue[dict]"] = {}
 
-async def search_memories_from_supabase(query: str):
-    """从 Supabase 搜索记忆"""
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            f"{SUPABASE_URL}/rest/v1/memories",
-            headers={
-                "apikey": SUPABASE_KEY,
-                "Authorization": f"Bearer {SUPABASE_KEY}"
-            },
-            params={
-                "content": f"ilike.%{query}%",
-                "order": "created_at.desc",
-                "limit": 10
-            }
-        )
-        return response.json()
-
-async def get_recent_memories_from_supabase(limit: int = 10):
-    """获取最近的记忆"""
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            f"{SUPABASE_URL}/rest/v1/memories",
-            headers={
-                "apikey": SUPABASE_KEY,
-                "Authorization": f"Bearer {SUPABASE_KEY}"
-            },
-            params={
-                "order": "created_at.desc",
-                "limit": limit
-            }
-        )
-        return response.json()
-
-async def call_tool(tool_name: str, arguments: Dict[str, Any]):
-    """调用工具"""
-    if tool_name == "save_memory":
-        result = await save_memory_to_supabase(
-            title=arguments.get("title"),
-            content=arguments.get("content"),
-            category=arguments.get("category"),
-            importance=arguments.get("importance", 3)
-        )
-        return {"success": True, "data": result}
-    
-    elif tool_name == "search_memory":
-        result = await search_memories_from_supabase(arguments.get("query"))
-        return {"success": True, "memories": result}
-    
-    elif tool_name == "get_recent_memories":
-        result = await get_recent_memories_from_supabase(arguments.get("limit", 10))
-        return {"success": True, "memories": result}
-    
-    else:
-        return {"success": False, "error": f"Unknown tool: {tool_name}"}
-
-async def event_stream():
-    """SSE 事件流"""
-    # 发送初始化消息
-    yield f"data: {json.dumps({'type': 'init', 'tools': TOOLS})}\n\n"
-    
-    # 保持连接
-    while True:
-        await asyncio.sleep(10)
-        yield f"data: {json.dumps({'type': 'ping'})}\n\n"
-
-@app.get("/")
-async def root():
-    """健康检查"""
-    return {"status": "ok", "message": "RikkaHub MCP Server is running"}
-
-@app.get("/mcp")
-async def mcp_endpoint():
-    """MCP SSE 端点"""
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-        }
-    )
-
-@app.post("/mcp/tools")
-async def execute_tool(request: Request):
-    """执行工具调用"""
-    data = await request.json()
-    tool_name = data.get("name")
-    arguments = data.get("arguments", {})
-    
-    result = await call_tool(tool_name, arguments)
-    return JSONResponse(content=result)
-
-@app.get("/health")
-async def health_check():
-    """健康检查端点"""
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "supabase_configured": bool(SUPABASE_URL and SUPABASE_KEY),
-        "pinecone_configured": bool(PINECONE_API_KEY),
-        "openai_configured": bool(OPENAI_API_KEY)
-    }
-
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
-from fastapi import FastAPI
 
 @app.get("/")
 def root():
     return {"status": "ok"}
 
+
 @app.get("/health")
 def health():
-    return "ok"
+    return {
+        "status": "ok",
+        "timestamp": datetime.now().isoformat(),
+        "supabase_configured": bool(SUPABASE_URL and SUPABASE_KEY),
+    }
+
+
+def sse(event: str, data: Any) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+async def sse_stream(session_id: str):
+    # 立刻发 endpoint，RikkaHub 就靠这个完成握手
+    yield sse("endpoint", {"uri": f"/mcp/message/{session_id}"})
+    yield sse("ready", {"ok": True})
+
+    q = SESSIONS[session_id]
+
+    # 保活 + 推送消息
+    while True:
+        try:
+            msg = await asyncio.wait_for(q.get(), timeout=25)
+            yield sse("message", msg)
+        except asyncio.TimeoutError:
+            yield sse("ping", {"t": datetime.now().isoformat()})
+
+
+@app.get("/mcp")
+async def mcp_sse():
+    session_id = uuid.uuid4().hex
+    SESSIONS[session_id] = asyncio.Queue()
+
+    return StreamingResponse(
+        sse_stream(session_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def jsonrpc_result(_id, result):
+    return {"jsonrpc": "2.0", "id": _id, "result": result}
+
+
+def jsonrpc_error(_id, code, message):
+    return {"jsonrpc": "2.0", "id": _id, "error": {"code": code, "message": message}}
+
+
+async def handle_rpc(payload: dict):
+    _id = payload.get("id")
+    method = payload.get("method")
+    params = payload.get("params") or {}
+
+    # MCP 常见：initialize
+    if method == "initialize":
+        return jsonrpc_result(
+            _id,
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "rikka-memory", "version": "0.1.0"},
+            },
+        )
+
+    # tools/list
+    if method in ("tools/list", "list_tools"):
+        return jsonrpc_result(_id, {"tools": TOOLS})
+
+    # tools/call
+    if method in ("tools/call", "call_tool"):
+        name = params.get("name")
+        arguments = params.get("arguments") or {}
+
+        # 先做一个“保底返回”，避免没配数据库就把连接搞崩
+        if not (SUPABASE_URL and SUPABASE_KEY):
+            return jsonrpc_result(
+                _id,
+                {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Supabase 未配置，先在 Railway Variables 添加 SUPABASE_URL / SUPABASE_KEY",
+                        }
+                    ]
+                },
+            )
+
+        # 这里你后续再接入真实 supabase 存取逻辑
+        return jsonrpc_result(
+            _id,
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"已收到工具调用 {name}，arguments={arguments}",
+                    }
+                ]
+            },
+        )
+
+    return jsonrpc_error(_id, -32601, f"Method not found: {method}")
+
+
+@app.post("/mcp/message/{session_id}")
+async def mcp_message(session_id: str, request: Request):
+    if session_id not in SESSIONS:
+        raise HTTPException(status_code=404, detail="Unknown session")
+
+    payload = await request.json()
+    resp = await handle_rpc(payload)
+
+    # 按 SSE transport 习惯：HTTP 端返回 202，真正响应走 SSE message 推回去
+    await SESSIONS[session_id].put(resp)
+    return JSONResponse({"ok": True}, status_code=202)
