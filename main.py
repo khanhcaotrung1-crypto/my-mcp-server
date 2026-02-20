@@ -19,12 +19,11 @@ app.add_middleware(
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-
 TOOLS = [
     {
         "name": "save_memory",
         "description": "保存一条记忆到数据库",
-        "input_schema": {
+        "inputSchema": {
             "type": "object",
             "properties": {
                 "title": {"type": "string"},
@@ -38,7 +37,7 @@ TOOLS = [
     {
         "name": "search_memory",
         "description": "搜索相关的记忆",
-        "input_schema": {
+        "inputSchema": {
             "type": "object",
             "properties": {"query": {"type": "string"}},
             "required": ["query"],
@@ -47,9 +46,13 @@ TOOLS = [
     {
         "name": "get_recent_memories",
         "description": "获取最近的记忆",
-        "input_schema": {"type": "object", "properties": {"limit": {"type": "integer"}}},
+        "inputSchema": {
+            "type": "object",
+            "properties": {"limit": {"type": "integer"}},
+        },
     },
 ]
+
 
 def jsonrpc_result(_id, result):
     return {"jsonrpc": "2.0", "id": _id, "result": result}
@@ -86,7 +89,7 @@ async def handle_rpc(payload: dict):
 
     if method in ("tools/list", "list_tools"):
         return jsonrpc_result(_id, {"tools": TOOLS})
-
+    
     if method in ("tools/call", "call_tool"):
         name = params.get("name")
         arguments = params.get("arguments") or {}
