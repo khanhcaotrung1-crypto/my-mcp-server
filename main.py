@@ -14,7 +14,7 @@ from typing import Dict, List, Any
 import httpx
 
 app = FastAPI(title="RikkaHub MCP Server")
- from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse
 import asyncio, json
 
 TOOLS = [
