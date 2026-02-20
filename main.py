@@ -77,6 +77,13 @@ def health():
         "supabase_configured": bool(SUPABASE_URL and SUPABASE_KEY),
     }
 
+def sse_data(data) -> str:
+    # 不发 event:，只发 data:
+    if isinstance(data, str):
+        payload = data
+    else:
+        payload = json.dumps(data, ensure_ascii=False)
+    return f"data: {payload}\n\n"
 
 def sse(event: str, data: Any) -> str:
     if isinstance(data, str):
@@ -87,8 +94,8 @@ def sse(event: str, data: Any) -> str:
 
 async def sse_stream(session_id: str):
     # 立刻发 endpoint，RikkaHub 就靠这个完成握手
-    yield sse("endpoint", f"message/{session_id}")
-    yield sse("ready", {"ok": True})
+    yield sse_data({"type": "endpoint", "uri": f"message/{session_id}"})
+    yield sse_data({"type": "ready", "ok": True})
 
     q = SESSIONS[session_id]
 
@@ -96,10 +103,10 @@ async def sse_stream(session_id: str):
     while True:
         try:
             msg = await asyncio.wait_for(q.get(), timeout=25)
-            yield sse("message", msg)
+            yield sse_data(msg)
         except asyncio.TimeoutError:
-            yield sse("ping", {"t": datetime.now().isoformat()})
-
+            # ping
+            yield sse_data({"type": "ping", "t": datetime.now().isoformat()})
 
 @app.get("/mcp")
 async def mcp_sse():
