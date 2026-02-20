@@ -79,12 +79,15 @@ def health():
 
 
 def sse(event: str, data: Any) -> str:
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-
+    if isinstance(data, str):
+        payload = data
+    else:
+        payload = json.dumps(data, ensure_ascii=False)
+    return f"event: {event}\ndata: {payload}\n\n"
 
 async def sse_stream(session_id: str):
     # 立刻发 endpoint，RikkaHub 就靠这个完成握手
-    yield sse("endpoint", {"uri": f"message/{session_id}"})
+    yield sse("endpoint", f"message/{session_id}")
     yield sse("ready", {"ok": True})
 
     q = SESSIONS[session_id]
