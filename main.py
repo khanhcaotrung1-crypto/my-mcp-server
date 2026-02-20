@@ -1,3 +1,4 @@
+print("BOOT: LOADED main.py v2026-02-20-1609")
 """
 RikkaHub MCP Server
 一个简单的 MCP 服务器，提供记忆管理和搜索功能
