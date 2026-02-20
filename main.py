@@ -14,6 +14,9 @@ from typing import Dict, List, Any
 import httpx
 
 app = FastAPI(title="RikkaHub MCP Server")
+@app.get("/__whoami")
+def whoami():
+    return {"service": "my-mcp-server", "version": "v1-mcp-route-test"}
 from fastapi.responses import StreamingResponse
 import asyncio, json
 
