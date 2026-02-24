@@ -250,8 +250,8 @@ async def mcp(request: Request):
             return JSONResponse(jsonrpc_error(_id, -32000, "Tool execution failed", data=str(e)), status_code=200)
 
     return JSONResponse(jsonrpc_error(_id, -32601, f"Method not found: {method}"), status_code=200)
-  
-  @app.get("/debug/embedding_dim")
+
+@app.get("/debug/embedding_dim")
 async def debug_embedding_dim():
     vec = await embed_text("测试一下维度")
     return {"dim": len(vec)}
