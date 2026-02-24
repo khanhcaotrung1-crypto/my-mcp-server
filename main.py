@@ -87,8 +87,29 @@ from fastapi.responses import StreamingResponse
 
 @app.api_route("/mcp", methods=["GET", "POST"])
 async def mcp_entry(request: Request):
-    # 兼容 RikkaHub 用 POST 来发起握手
-    return await mcp_sse()
+    # GET: 标准 streamable_http 方式，建立 SSE 流
+    if request.method == "GET":
+        return await mcp_sse()
+
+    # POST: 一些客户端（尤其是 ktor-client）会误把 /mcp 当成 JSON-RPC 入口
+    # 这时不能返回 SSE（会导致客户端一直等到超时，表现为“连不上”）
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = None
+
+    # 1) 如果它就是 JSON-RPC（含 method 字段），直接同步返回 JSON-RPC 响应
+    if isinstance(payload, dict) and payload.get("method"):
+        resp = await handle_rpc(payload)
+        return JSONResponse(resp, status_code=200)
+
+    # 2) 否则当作“握手”请求：创建 session，返回 endpoint 信息（非流式）
+    session_id = uuid.uuid4().hex
+    SESSIONS[session_id] = asyncio.Queue()
+    return JSONResponse(
+        {"type": "endpoint", "uri": f"message/{session_id}", "ok": True},
+        status_code=200,
+    )
 
 @app.get("/")
 def root():
