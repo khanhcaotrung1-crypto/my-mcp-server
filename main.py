@@ -46,7 +46,7 @@ TOOLS = [
     {
         "name": "save_memory",
         "description": "保存一条记忆到数据库（同时写入 embedding 向量，便于语义检索）",
-        "input_schema": {
+        "inputSchema": {
             "type": "object",
             "properties": {
                 "title": {"type": "string"},
@@ -60,7 +60,7 @@ TOOLS = [
     {
         "name": "search_memory",
         "description": "语义搜索相关记忆（优先向量检索，失败则降级关键字检索）",
-        "input_schema": {
+        "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
@@ -72,7 +72,7 @@ TOOLS = [
     {
         "name": "get_recent_memories",
         "description": "获取最近的记忆",
-        "input_schema": {
+        "inputSchema": {
             "type": "object",
             "properties": {"limit": {"type": "integer", "default": 10}},
         },
