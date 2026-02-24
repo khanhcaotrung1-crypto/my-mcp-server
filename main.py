@@ -1,34 +1,26 @@
 import os
 import json
+import asyncio
+import uuid
 from datetime import datetime
-from typing import Any, Dict, Optional
-from urllib.parse import quote
+from typing import Any, Dict, Optional, List
 
-import requests
+import httpx
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from urllib.parse import unquote
 
-"""
-RikkaHub MCP (Streamable HTTP) — minimal, stable FastAPI server
+# =========================================================
+# RikkaHub MCP Server (streamable_http transport)
+# - SSE at GET  /mcp
+# - JSON-RPC POST /message/{session_id}
+# - Compatible fallback paths for some clients
+# - Supabase (PostgREST) storage + pgvector semantic search
+# =========================================================
 
-✅ Recommended in RikkaHub:
-type = "streamable_http"
-url  = "https://<your-domain>/mcp"
+app = FastAPI(title="RikkaHub MCP Server")
 
-Env (Railway Variables):
-- PORT (Railway sets)
-- SUPABASE_URL
-- SUPABASE_KEY   (service_role key recommended for server-side)
-
-Notes:
-- This version avoids SSE handshake issues and works like common public MCP servers
-  (client POSTs JSON-RPC to /mcp, server replies JSON-RPC in the HTTP response).
-"""
-
-app = FastAPI(title="RikkaHub MCP Server (Streamable HTTP)")
-
-# ---- CORS ----
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -37,121 +29,63 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
-SUPABASE_KEY = (os.getenv("SUPABASE_KEY") or "").strip()
+# ---------- Env ----------
+SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY") or ""
 
-# --- MCP tool definitions ---
-# Some clients require `inputSchema` (camelCase). Mirror `input_schema` for compatibility.
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or ""
+# For third-party OpenAI-compatible providers, set e.g. https://api.linkapi.ai/v1
+OPENAI_API_URL = (os.getenv("OPENAI_API_URL") or "https://api.openai.com/v1").rstrip("/")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL") or "text-embedding-3-small"  # default fallback
+
+# (Optional) you can keep it for future, not used in this version
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY") or ""
+
+# ---------- MCP tool definitions ----------
 TOOLS = [
     {
         "name": "save_memory",
-        "description": "保存一条记忆到数据库（Supabase memories 表）",
-        "inputSchema": {
+        "description": "保存一条记忆到数据库（同时写入 embedding 向量，便于语义检索）",
+        "input_schema": {
             "type": "object",
             "properties": {
-                "title": {"type": "string", "description": "标题"},
-                "content": {"type": "string", "description": "内容"},
-                "category": {"type": "string", "description": "分类，可选"},
-                "importance": {"type": "integer", "description": "重要性 0-5，可选"},
+                "title": {"type": "string"},
+                "content": {"type": "string"},
+                "category": {"type": "string"},
+                "importance": {"type": "integer"},
             },
             "required": ["title", "content"],
         },
     },
     {
         "name": "search_memory",
-        "description": "按关键词搜索记忆（匹配 title/content）",
-        "inputSchema": {
+        "description": "语义搜索相关记忆（优先向量检索，失败则降级关键字检索）",
+        "input_schema": {
             "type": "object",
-            "properties": {"query": {"type": "string", "description": "搜索关键词"}},
+            "properties": {
+                "query": {"type": "string"},
+                "k": {"type": "integer", "default": 5},
+            },
             "required": ["query"],
         },
     },
     {
         "name": "get_recent_memories",
-        "description": "获取最近的记忆（按时间倒序）",
-        "inputSchema": {
+        "description": "获取最近的记忆",
+        "input_schema": {
             "type": "object",
-            "properties": {"limit": {"type": "integer", "description": "返回条数，默认 10"}},
+            "properties": {"limit": {"type": "integer", "default": 10}},
         },
     },
 ]
 
-for t in TOOLS:
-    t["input_schema"] = t["inputSchema"]
+# ---------- SSE sessions ----------
+SESSIONS: Dict[str, "asyncio.Queue[dict]"] = {}
 
 
-# ---- Helpers: JSON-RPC ----
-def jsonrpc_result(_id: Any, result: Any) -> Dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": _id, "result": result}
-
-
-def jsonrpc_error(_id: Any, code: int, message: str, data: Optional[Any] = None) -> Dict[str, Any]:
-    err = {"code": code, "message": message}
-    if data is not None:
-        err["data"] = data
-    return {"jsonrpc": "2.0", "id": _id, "error": err}
-
-
-def tool_text(text: str) -> Dict[str, Any]:
-    return {"content": [{"type": "text", "text": text}]}
-
-
-# ---- Supabase REST helpers (no extra deps) ----
-def _sb_headers(prefer: Optional[str] = None) -> Dict[str, str]:
-    if not SUPABASE_KEY:
-        return {}
-    h = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-    }
-    if prefer:
-        h["Prefer"] = prefer
-    return h
-
-
-def _sb_ok() -> bool:
-    return bool(SUPABASE_URL and SUPABASE_KEY)
-
-
-def supabase_insert_memory(title: str, content: str, category: Optional[str], importance: Optional[int]) -> Dict[str, Any]:
-    url = f"{SUPABASE_URL}/rest/v1/memories"
-    payload: Dict[str, Any] = {"title": title, "content": content}
-    if category:
-        payload["category"] = category
-    if importance is not None:
-        payload["importance"] = int(importance)
-
-    r = requests.post(url, headers=_sb_headers(prefer="return=representation"), data=json.dumps(payload), timeout=15)
-    if r.status_code >= 300:
-        raise RuntimeError(f"Supabase insert failed ({r.status_code}): {r.text}")
-    data = r.json()
-    return data[0] if isinstance(data, list) and data else {"ok": True}
-
-
-def supabase_search_memories(query: str, limit: int = 10) -> Any:
-    q = query.replace("%", "").strip()
-    like = f"*{q}*"
-    or_filter = f"(title.ilike.{like},content.ilike.{like})"
-    url = f"{SUPABASE_URL}/rest/v1/memories?select=*&or={quote(or_filter)}&order=created_at.desc&limit={int(limit)}"
-    r = requests.get(url, headers=_sb_headers(), timeout=15)
-    if r.status_code >= 300:
-        raise RuntimeError(f"Supabase search failed ({r.status_code}): {r.text}")
-    return r.json()
-
-
-def supabase_recent_memories(limit: int = 10) -> Any:
-    url = f"{SUPABASE_URL}/rest/v1/memories?select=*&order=created_at.desc&limit={int(limit)}"
-    r = requests.get(url, headers=_sb_headers(), timeout=15)
-    if r.status_code >= 300:
-        raise RuntimeError(f"Supabase recent failed ({r.status_code}): {r.text}")
-    return r.json()
-
-
-# ---- Basic routes ----
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "mcp-streamable-http"}
+    return {"status": "ok"}
 
 
 @app.get("/health")
@@ -159,140 +93,373 @@ def health():
     return {
         "status": "ok",
         "timestamp": datetime.now().isoformat(),
-        "supabase_configured": _sb_ok(),
+        "supabase_configured": bool(SUPABASE_URL and SUPABASE_KEY),
+        "openai_configured": bool(OPENAI_API_KEY),
+        "openai_api_url": OPENAI_API_URL,
+        "embedding_model": EMBEDDING_MODEL,
     }
 
 
-# ---- MCP Streamable HTTP endpoint ----
-@app.post("/mcp")
-async def mcp(request: Request):
-    """Streamable HTTP: client POSTs JSON-RPC -> server replies JSON-RPC in HTTP response."""
+# ---------- SSE helpers ----------
+def sse_data(data: Any) -> str:
+    payload = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False)
+    return f"data: {payload}\n\n"
+
+
+async def sse_stream(session_id: str):
+    # RikkaHub handshake expectations
+    yield sse_data({"type": "endpoint", "uri": f"message/{session_id}"})
+    yield sse_data({"type": "ready", "ok": True})
+
+    q = SESSIONS[session_id]
+    while True:
+        try:
+            msg = await asyncio.wait_for(q.get(), timeout=25)
+            yield sse_data(msg)
+        except asyncio.TimeoutError:
+            yield sse_data({"type": "ping", "t": datetime.now().isoformat()})
+
+
+@app.get("/mcp")
+async def mcp_sse():
+    session_id = uuid.uuid4().hex
+    SESSIONS[session_id] = asyncio.Queue()
+    return StreamingResponse(
+        sse_stream(session_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# Some clients will call /mcp/message/<id>
+@app.post("/mcp/message/{session_id}")
+async def mcp_message(session_id: str, request: Request):
+    return await _handle_message(session_id, request)
+
+
+# Some clients will call /message/<id>
+@app.post("/message/{session_id}")
+async def root_message(session_id: str, request: Request):
+    return await _handle_message(session_id, request)
+
+
+# Some clients (ktor-client) may POST to a weird JSON path like /{"uri":"message/<id>"}
+@app.post("/{weird:path}")
+async def weird_endpoint_fix(weird: str, request: Request):
+    decoded = unquote(weird)
+    if not decoded.lstrip().startswith('{"uri"'):
+        raise HTTPException(status_code=404, detail="Not Found")
+    try:
+        obj = json.loads(decoded)
+        uri = obj.get("uri", "")
+    except Exception:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    if "message/" not in uri:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    session_id = uri.split("message/", 1)[1].split("/", 1)[0]
+    return await _handle_message(session_id, request)
+
+
+# ---------- JSON-RPC core ----------
+def jsonrpc_result(_id: Any, result: Any):
+    return {"jsonrpc": "2.0", "id": _id, "result": result}
+
+
+def jsonrpc_error(_id: Any, code: int, message: str, data: Any = None):
+    err = {"code": code, "message": message}
+    if data is not None:
+        err["data"] = data
+    return {"jsonrpc": "2.0", "id": _id, "error": err}
+
+
+async def _handle_message(session_id: str, request: Request):
+    if session_id not in SESSIONS:
+        raise HTTPException(status_code=404, detail="Unknown session")
+
     try:
         payload = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
+    resp = await handle_rpc(payload)
+
+    # Transport style: push response through SSE, HTTP returns quickly
+    await SESSIONS[session_id].put(resp)
+    return JSONResponse({"ok": True}, status_code=200)
+
+
+# ---------- OpenAI-compatible embeddings ----------
+def _embedding_endpoint() -> str:
+    # If OPENAI_API_URL already endswith /v1, use /embeddings after it
+    # Examples:
+    # - https://api.openai.com/v1
+    # - https://api.linkapi.ai/v1
+    return f"{OPENAI_API_URL}/embeddings"
+
+
+async def embed_text(text: str) -> List[float]:
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is missing")
+
+    url = _embedding_endpoint()
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    body = {"model": EMBEDDING_MODEL, "input": text}
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(url, headers=headers, json=body)
+
+    if r.status_code >= 400:
+        # Keep provider's error text for debugging
+        raise RuntimeError(f"Embeddings HTTP {r.status_code}: {r.text}")
+
+    data = r.json()
+    try:
+        return data["data"][0]["embedding"]
+    except Exception:
+        raise RuntimeError(f"Bad embeddings response: {data}")
+
+
+def _vec_to_pgvector_literal(vec: List[float]) -> str:
+    # pgvector accepts: '[0.1,0.2,0.3]'
+    return "[" + ",".join(f"{x:.8f}" for x in vec) + "]"
+
+
+# ---------- Supabase helpers ----------
+def _supabase_headers():
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        raise RuntimeError("Supabase 未配置：缺少 SUPABASE_URL / SUPABASE_KEY")
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+
+async def supabase_insert_memory(
+    title: str,
+    content: str,
+    category: Optional[str] = None,
+    importance: Optional[int] = None,
+    embedding_vec: Optional[List[float]] = None,
+):
+    url = f"{SUPABASE_URL}/rest/v1/memories"
+    payload: Dict[str, Any] = {
+        "title": title,
+        "content": content,
+    }
+    if category is not None:
+        payload["category"] = category
+    if importance is not None:
+        payload["importance"] = importance
+    if embedding_vec is not None:
+        payload["embedding"] = _vec_to_pgvector_literal(embedding_vec)
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(url, headers=_supabase_headers(), json=payload)
+
+    if r.status_code >= 400:
+        raise RuntimeError(f"Supabase insert failed {r.status_code}: {r.text}")
+
+    # By default PostgREST may return empty body unless you add Prefer
+    return True
+
+
+async def supabase_recent_memories(limit: int = 10):
+    url = f"{SUPABASE_URL}/rest/v1/memories"
+    params = {
+        "select": "id,title,content,category,importance,created_at",
+        "order": "created_at.desc",
+        "limit": str(max(1, min(limit, 50))),
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(url, headers=_supabase_headers(), params=params)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Supabase query failed {r.status_code}: {r.text}")
+    return r.json()
+
+
+async def supabase_keyword_search(query: str, k: int = 5):
+    # basic fallback if vector RPC not available
+    url = f"{SUPABASE_URL}/rest/v1/memories"
+    # title/content ILIKE
+    params = {
+        "select": "id,title,content,category,importance,created_at",
+        "or": f"(title.ilike.*{query}*,content.ilike.*{query}*)",
+        "order": "created_at.desc",
+        "limit": str(max(1, min(k, 20))),
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(url, headers=_supabase_headers(), params=params)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Supabase keyword search failed {r.status_code}: {r.text}")
+    return r.json()
+
+
+async def supabase_vector_search(query_embedding: List[float], k: int = 5):
+    """
+    Requires you to create a SQL RPC function in Supabase:
+
+    -- 1) enable pgvector
+    create extension if not exists vector;
+
+    -- 2) embedding column should be vector(1024) for your current model
+    alter table memories
+      alter column embedding type vector(1024);
+
+    -- 3) index (optional but recommended once you have lots of rows)
+    create index if not exists memories_embedding_idx
+      on memories using ivfflat (embedding vector_cosine_ops) with (lists = 100);
+
+    -- 4) RPC function
+    create or replace function match_memories(
+      query_embedding vector(1024),
+      match_count int default 5
+    )
+    returns table(
+      id uuid,
+      title text,
+      content text,
+      category text,
+      importance int,
+      created_at timestamptz,
+      similarity float
+    )
+    language sql stable
+    as $$
+      select
+        m.id,
+        m.title,
+        m.content,
+        m.category,
+        m.importance,
+        m.created_at,
+        1 - (m.embedding <=> query_embedding) as similarity
+      from memories m
+      where m.embedding is not null
+      order by m.embedding <=> query_embedding
+      limit match_count;
+    $$;
+    """
+    url = f"{SUPABASE_URL}/rest/v1/rpc/match_memories"
+    payload = {
+        "query_embedding": _vec_to_pgvector_literal(query_embedding),
+        "match_count": max(1, min(k, 20)),
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(url, headers=_supabase_headers(), json=payload)
+
+    if r.status_code == 404:
+        # function not created yet
+        raise RuntimeError("Supabase RPC match_memories not found (请先在 Supabase 里创建 SQL function)")
+    if r.status_code >= 400:
+        raise RuntimeError(f"Supabase vector search failed {r.status_code}: {r.text}")
+    return r.json()
+
+
+# ---------- Tool handlers ----------
+async def handle_rpc(payload: dict):
     _id = payload.get("id")
     method = payload.get("method")
     params = payload.get("params") or {}
 
-    if not method:
-        return JSONResponse(jsonrpc_error(_id, -32600, "Invalid Request: missing method"), status_code=200)
-
     if method == "initialize":
-        return JSONResponse(
-            jsonrpc_result(
-                _id,
-                {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "rikka-memory", "version": "0.2.0"},
-                },
-            ),
-            status_code=200,
+        return jsonrpc_result(
+            _id,
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "rikka-memory", "version": "0.2.0"},
+            },
         )
 
     if method in ("tools/list", "list_tools"):
-        return JSONResponse(jsonrpc_result(_id, {"tools": TOOLS}), status_code=200)
+        return jsonrpc_result(_id, {"tools": TOOLS})
 
     if method in ("tools/call", "call_tool"):
         name = params.get("name")
         arguments = params.get("arguments") or {}
 
-        if name not in {"save_memory", "search_memory", "get_recent_memories"}:
-            return JSONResponse(jsonrpc_error(_id, -32601, f"Unknown tool: {name}"), status_code=200)
-
-        if not _sb_ok():
-            return JSONResponse(
-                jsonrpc_result(
-                    _id,
-                    tool_text("Supabase 未配置。请在 Railway Variables 添加 SUPABASE_URL / SUPABASE_KEY（建议 service_role key）"),
-                ),
-                status_code=200,
-            )
-
         try:
             if name == "save_memory":
-                title = str(arguments.get("title", "")).strip()
-                content = str(arguments.get("content", "")).strip()
-                if not title or not content:
-                    return JSONResponse(jsonrpc_error(_id, -32602, "Missing required: title/content"), status_code=200)
-
+                title = (arguments.get("title") or "").strip()
+                content = (arguments.get("content") or "").strip()
                 category = arguments.get("category")
                 importance = arguments.get("importance")
 
-                row = supabase_insert_memory(title, content, category, importance)
-                return JSONResponse(
-                    jsonrpc_result(
-                        _id,
-                        tool_text(f"✅ 已写入 memories：id={row.get('id','?')} title={row.get('title','')}")),
-                    status_code=200,
+                if not title or not content:
+                    return jsonrpc_error(_id, -32602, "title/content required")
+
+                # 1) compute embedding (title + newline + content)
+                emb = await embed_text(title + "\n" + content)
+
+                # 2) insert to supabase
+                await supabase_insert_memory(
+                    title=title,
+                    content=content,
+                    category=category,
+                    importance=importance,
+                    embedding_vec=emb,
+                )
+
+                return jsonrpc_result(
+                    _id,
+                    {
+                        "content": [
+                            {"type": "text", "text": "已写入 memories（含 embedding）"}
+                        ]
+                    },
+                )
+
+            if name == "get_recent_memories":
+                limit = int(arguments.get("limit") or 10)
+                rows = await supabase_recent_memories(limit=limit)
+                return jsonrpc_result(
+                    _id,
+                    {"content": [{"type": "text", "text": json.dumps(rows, ensure_ascii=False)}]},
                 )
 
             if name == "search_memory":
-                q = str(arguments.get("query", "")).strip()
-                if not q:
-                    return JSONResponse(jsonrpc_error(_id, -32602, "Missing required: query"), status_code=200)
+                query = (arguments.get("query") or "").strip()
+                k = int(arguments.get("k") or 5)
+                if not query:
+                    return jsonrpc_error(_id, -32602, "query required")
 
-                rows = supabase_search_memories(q, limit=int(arguments.get("limit", 10) or 10))
-                preview = "\n".join([f"- {r.get('title','(no title)')}: {str(r.get('content',''))[:60]}" for r in rows[:10]])
-                text = "🔎 搜索结果：\n" + (preview if preview else "(空)")
-                return JSONResponse(jsonrpc_result(_id, tool_text(text)), status_code=200)
+                # Try semantic search via RPC
+                try:
+                    q_emb = await embed_text(query)
+                    rows = await supabase_vector_search(q_emb, k=k)
+                except Exception:
+                    # fallback keyword search
+                    rows = await supabase_keyword_search(query, k=k)
 
-            if name == "get_recent_memories":
-                limit = int(arguments.get("limit", 10) or 10)
-                rows = supabase_recent_memories(limit=limit)
-                preview = "\n".join([f"- {r.get('title','(no title)')}: {str(r.get('content',''))[:60]}" for r in rows[:limit]])
-                text = "🕒 最近记忆：\n" + (preview if preview else "(空)")
-                return JSONResponse(jsonrpc_result(_id, tool_text(text)), status_code=200)
+                return jsonrpc_result(
+                    _id,
+                    {"content": [{"type": "text", "text": json.dumps(rows, ensure_ascii=False)}]},
+                )
+
+            return jsonrpc_error(_id, -32601, f"Unknown tool: {name}")
 
         except Exception as e:
-            return JSONResponse(jsonrpc_error(_id, -32000, "Tool execution failed", data=str(e)), status_code=200)
+            return jsonrpc_error(_id, -32000, "Tool execution error", data=str(e))
 
-    return JSONResponse(jsonrpc_error(_id, -32601, f"Method not found: {method}"), status_code=200)
+    return jsonrpc_error(_id, -32601, f"Method not found: {method}")
 
-import os
-import httpx
 
-OPENAI_API_URL = os.getenv("OPENAI_API_URL", "").rstrip("/")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "bge-m3")
-
-async def embed_text(text: str) -> list[float]:
-    if not OPENAI_API_URL or not OPENAI_API_KEY:
-        raise RuntimeError("Missing OPENAI_API_URL or OPENAI_API_KEY")
-
-    url = f"{OPENAI_API_URL}/embeddings"
-    payload = {
-        "model": EMBEDDING_MODEL,
-        "input": text,
-    }
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(url, json=payload, headers=headers)
-
-    if r.status_code >= 400:
-        raise RuntimeError(f"Embeddings HTTP {r.status_code}: {r.text}")
-
-    data = r.json()
-    return data["data"][0]["embedding"]
-
-from fastapi import HTTPException
-
+# ---------- Debug endpoint ----------
 @app.get("/debug/embedding_dim")
 async def debug_embedding_dim():
     try:
         vec = await embed_text("测试一下维度")
-        return {"dim": len(vec), "head": vec[:5]}
+        return {"dim": len(vec), "head": vec[:5], "model": EMBEDDING_MODEL, "api": OPENAI_API_URL}
     except Exception as e:
-        # 直接把错误吐出来，方便你在浏览器看到
         return {"error": str(e), "type": e.__class__.__name__}
-
-create index if not exists memories_embedding_idx
-on memories
-using ivfflat (embedding vector_cosine_ops)
-with (lists = 100);
