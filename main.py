@@ -251,6 +251,36 @@ async def mcp(request: Request):
 
     return JSONResponse(jsonrpc_error(_id, -32601, f"Method not found: {method}"), status_code=200)
 
+import os
+import httpx
+
+OPENAI_API_URL = os.getenv("OPENAI_API_URL", "").rstrip("/")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "bge-m3")
+
+async def embed_text(text: str) -> list[float]:
+    if not OPENAI_API_URL or not OPENAI_API_KEY:
+        raise RuntimeError("Missing OPENAI_API_URL or OPENAI_API_KEY")
+
+    url = f"{OPENAI_API_URL}/embeddings"
+    payload = {
+        "model": EMBEDDING_MODEL,
+        "input": text,
+    }
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(url, json=payload, headers=headers)
+
+    if r.status_code >= 400:
+        raise RuntimeError(f"Embeddings HTTP {r.status_code}: {r.text}")
+
+    data = r.json()
+    return data["data"][0]["embedding"]
+
 from fastapi import HTTPException
 
 @app.get("/debug/embedding_dim")
