@@ -251,7 +251,13 @@ async def mcp(request: Request):
 
     return JSONResponse(jsonrpc_error(_id, -32601, f"Method not found: {method}"), status_code=200)
 
+from fastapi import HTTPException
+
 @app.get("/debug/embedding_dim")
 async def debug_embedding_dim():
-    vec = await embed_text("测试一下维度")
-    return {"dim": len(vec)}
+    try:
+        vec = await embed_text("测试一下维度")
+        return {"dim": len(vec), "head": vec[:5]}
+    except Exception as e:
+        # 直接把错误吐出来，方便你在浏览器看到
+        return {"error": str(e), "type": e.__class__.__name__}
