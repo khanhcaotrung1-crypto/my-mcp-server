@@ -491,3 +491,36 @@ async def debug_embedding_dim():
         return {"dim": len(vec), "head": vec[:5], "model": EMBEDDING_MODEL, "api": OPENAI_API_URL}
     except Exception as e:
         return {"error": str(e), "type": e.__class__.__name__}
+
+# ---------- Debug endpoints ----------
+@app.get("/debug/embedding_dim")
+async def debug_embedding_dim():
+    try:
+        vec = await embed_text("测试一下维度")
+        return {"dim": len(vec), "head": vec[:5], "model": EMBEDDING_MODEL, "api": OPENAI_API_URL}
+    except Exception as e:
+        return {"error": str(e), "type": e.__class__.__name__}
+
+@app.get("/debug/vector_search")
+async def debug_vector_search(q: str = "测试", k: int = 5):
+    """用 query 文本走一次：embedding -> Supabase RPC match_memories"""
+    try:
+        q_emb = await embed_text(q)
+        rows = await supabase_vector_search(q_emb, k=k)
+        return {"ok": True, "k": k, "query": q, "rows": rows}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "type": e.__class__.__name__}
+
+@app.get("/debug/sql_snippet")
+def debug_sql_snippet():
+    """把需要在 Supabase SQL Editor 里执行的 SQL 片段吐出来，方便复制。"""
+    return {
+        "note": "去 Supabase Dashboard -> SQL Editor 执行下面这些（按需挑选）",
+        "sql": [
+            "create extension if not exists vector;",
+            "alter table memories alter column embedding type vector(1024);",
+            "create index if not exists memories_embedding_idx on memories using ivfflat (embedding vector_cosine_ops) with (lists = 100);",
+            'create or replace function match_memories(\n  query_embedding vector(1024),\n  match_count int default 5\n)\nreturns table(\n  id uuid,\n  title text,\n  content text,\n  category text,\n  importance int,\n  created_at timestamptz,\n  similarity float\n)\nlanguage sql stable\nas $$\n  select\n    m.id,\n    m.title,\n    m.content,\n    m.category,\n    m.importance,\n    m.created_at,\n    1 - (m.embedding <=> query_embedding) as similarity\n  from memories m\n  where m.embedding is not null\n  order by m.embedding <=> query_embedding\n  limit match_count;\n$$;',
+        ],
+    }
+
