@@ -82,6 +82,13 @@ TOOLS = [
 # ---------- SSE sessions ----------
 SESSIONS: Dict[str, "asyncio.Queue[dict]"] = {}
 
+from fastapi import Request
+from fastapi.responses import StreamingResponse
+
+@app.api_route("/mcp", methods=["GET", "POST"])
+async def mcp_entry(request: Request):
+    # 兼容 RikkaHub 用 POST 来发起握手
+    return await mcp_sse()
 
 @app.get("/")
 def root():
