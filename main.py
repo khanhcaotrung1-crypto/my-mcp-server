@@ -291,3 +291,8 @@ async def debug_embedding_dim():
     except Exception as e:
         # 直接把错误吐出来，方便你在浏览器看到
         return {"error": str(e), "type": e.__class__.__name__}
+
+create index if not exists memories_embedding_idx
+on memories
+using ivfflat (embedding vector_cosine_ops)
+with (lists = 100);
