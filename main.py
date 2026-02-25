@@ -480,7 +480,7 @@ async def supabase_vector_search(query_embedding: List[float], k: int = 5):
 
 
 # ---------- Tool handlers ----------
-async async def handle_rpc(payload: dict):
+async def handle_rpc(payload: dict):
     _id = payload.get("id")
     method = payload.get("method")
     params = payload.get("params") or {}
