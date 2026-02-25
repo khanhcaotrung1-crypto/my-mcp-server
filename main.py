@@ -583,8 +583,16 @@ async def handle_rpc(payload: dict):
                     return jsonrpc_error(_id, -32602, "city required (adcode or cityname)")
                 data = await amap_weather(city=city, extensions=extensions)
                 return jsonrpc_result(_id, {"content": [{"type":"text","text": json.dumps(data, ensure_ascii=False)}]})
+                
             if name == "amap_poi_around":
-                location = (arguments.get("location") or "").strip()
+                location = (arguments.get("location") or "").strip()  # "lng,lat"
+            
+            # 兼容 RikkaHub 传 lat/lng
+            if not location:
+            lng = arguments.get("lng")
+            lat = arguments.get("lat")
+            if lng is not None and lat is not None:
+                location = f"{lng},{lat}"
                 address = (arguments.get("address") or "").strip()
                 keywords = (arguments.get("keywords") or "").strip() or None
                 types = (arguments.get("types") or "").strip() or None
