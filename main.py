@@ -583,16 +583,32 @@ async def handle_rpc(payload: dict):
                     return jsonrpc_error(_id, -32602, "city required (adcode or cityname)")
                 data = await amap_weather(city=city, extensions=extensions)
                 return jsonrpc_result(_id, {"content": [{"type":"text","text": json.dumps(data, ensure_ascii=False)}]})
-
             if name == "amap_poi_around":
-                location = (arguments.get("location") or "").strip()  # "lng,lat"
-                keywords = (arguments.get("keywords") or "").strip() or None
-                types = (arguments.get("types") or "").strip() or None
-                radius = int(arguments.get("radius") or 3000)
-                if not location:
-                    return jsonrpc_error(_id, -32602, "location required (lng,lat)")
-                data = await amap_poi_around(location=location, keywords=keywords, types=types, radius=radius)
-                return jsonrpc_result(_id, {"content": [{"type":"text","text": json.dumps(data, ensure_ascii=False)}]})
+            location = (arguments.get("location") or "").strip()
+            address = (arguments.get("address") or "").strip()
+            keywords = (arguments.get("keywords") or "").strip() or None
+            types = (arguments.get("types") or "").strip() or None
+            radius = int(arguments.get("radius") or 3000)
+            
+            # 如果给的是地址 就自动 geocode
+            if address:
+                geo = await amap_geocode(address=address)
+                if geo.get("geocodes"):
+                    location = geo["geocodes"][0]["location"]
+            
+            if not location:
+                return jsonrpc_error(_id, -32602, "location or address required")
+            
+            data = await amap_poi_around(
+                location=location,
+                keywords=keywords,
+                types=types,
+                radius=radius
+            )
+            
+            return jsonrpc_result(_id, {
+                "content":[{"type":"text","text":json.dumps(data,ensure_ascii=False)}]
+            })
 
             if name == "amap_route_driving":
                 origin = (arguments.get("origin") or "").strip()
