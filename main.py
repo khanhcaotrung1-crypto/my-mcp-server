@@ -40,6 +40,8 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL") or "text-embedding-3-small"  # de
 
 # (Optional) you can keep it for future, not used in this version
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY") or ""
+AMAP_KEY = os.getenv("AMAP_KEY") or ""
+PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN") or ""
 
 # ---------- MCP tool definitions ----------
 TOOLS = [
@@ -478,7 +480,7 @@ async def supabase_vector_search(query_embedding: List[float], k: int = 5):
 
 
 # ---------- Tool handlers ----------
-async def handle_rpc(payload: dict):
+async async def handle_rpc(payload: dict):
     _id = payload.get("id")
     method = payload.get("method")
     params = payload.get("params") or {}
@@ -558,6 +560,57 @@ async def handle_rpc(payload: dict):
                     {"content": [{"type": "text", "text": json.dumps(rows, ensure_ascii=False)}]},
                 )
 
+
+            if name == "amap_geocode":
+                address = (arguments.get("address") or "").strip()
+                city = (arguments.get("city") or "").strip() or None
+                if not address:
+                    return jsonrpc_error(_id, -32602, "address required")
+                data = await amap_geocode(address=address, city=city)
+                return jsonrpc_result(_id, {"content": [{"type":"text","text": json.dumps(data, ensure_ascii=False)}]})
+
+            if name == "amap_reverse_geocode":
+                location = (arguments.get("location") or "").strip()  # "lng,lat"
+                if not location:
+                    return jsonrpc_error(_id, -32602, "location required (lng,lat)")
+                data = await amap_reverse_geocode(location=location)
+                return jsonrpc_result(_id, {"content": [{"type":"text","text": json.dumps(data, ensure_ascii=False)}]})
+
+            if name == "amap_weather":
+                city = (arguments.get("city") or "").strip()  # adcode or cityname
+                extensions = (arguments.get("extensions") or "base").strip()  # base|all
+                if not city:
+                    return jsonrpc_error(_id, -32602, "city required (adcode or cityname)")
+                data = await amap_weather(city=city, extensions=extensions)
+                return jsonrpc_result(_id, {"content": [{"type":"text","text": json.dumps(data, ensure_ascii=False)}]})
+
+            if name == "amap_poi_around":
+                location = (arguments.get("location") or "").strip()  # "lng,lat"
+                keywords = (arguments.get("keywords") or "").strip() or None
+                types = (arguments.get("types") or "").strip() or None
+                radius = int(arguments.get("radius") or 3000)
+                if not location:
+                    return jsonrpc_error(_id, -32602, "location required (lng,lat)")
+                data = await amap_poi_around(location=location, keywords=keywords, types=types, radius=radius)
+                return jsonrpc_result(_id, {"content": [{"type":"text","text": json.dumps(data, ensure_ascii=False)}]})
+
+            if name == "amap_route_driving":
+                origin = (arguments.get("origin") or "").strip()
+                destination = (arguments.get("destination") or "").strip()
+                if not origin or not destination:
+                    return jsonrpc_error(_id, -32602, "origin/destination required (lng,lat)")
+                data = await amap_route_driving(origin=origin, destination=destination)
+                return jsonrpc_result(_id, {"content": [{"type":"text","text": json.dumps(data, ensure_ascii=False)}]})
+
+            if name == "pushplus_notify":
+                title = (arguments.get("title") or "RikkaHub 通知").strip()
+                content = (arguments.get("content") or "").strip()
+                if not content:
+                    return jsonrpc_error(_id, -32602, "content required")
+                data = await pushplus_notify(title=title, content=content)
+                return jsonrpc_result(_id, {"content": [{"type":"text","text": json.dumps(data, ensure_ascii=False)}]})
+
+
             return jsonrpc_error(_id, -32601, f"Unknown tool: {name}")
 
         except Exception as e:
@@ -600,3 +653,67 @@ def debug_sql_snippet():
         ],
     }
 
+
+
+# -----------------------
+# AMap (Gaode) helpers
+# -----------------------
+AMAP_BASE = "https://restapi.amap.com"
+
+async def _amap_get(path: str, params: dict):
+    if not AMAP_KEY:
+        raise RuntimeError("AMAP_KEY missing")
+    url = AMAP_BASE + path
+    p = {"key": AMAP_KEY, **{k:v for k,v in (params or {}).items() if v is not None and v != ""}}
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.get(url, params=p)
+        r.raise_for_status()
+        return r.json()
+
+async def amap_geocode(address: str, city: Optional[str] = None):
+    # https://restapi.amap.com/v3/geocode/geo
+    return await _amap_get("/v3/geocode/geo", {"address": address, "city": city})
+
+async def amap_reverse_geocode(location: str):
+    # https://restapi.amap.com/v3/geocode/regeo
+    return await _amap_get("/v3/geocode/regeo", {"location": location, "radius": 1000, "extensions": "all"})
+
+async def amap_weather(city: str, extensions: str = "base"):
+    # https://restapi.amap.com/v3/weather/weatherInfo
+    if extensions not in ("base", "all"):
+        extensions = "base"
+    return await _amap_get("/v3/weather/weatherInfo", {"city": city, "extensions": extensions})
+
+async def amap_poi_around(location: str, keywords: Optional[str] = None, types: Optional[str] = None, radius: int = 3000):
+    # https://restapi.amap.com/v3/place/around
+    return await _amap_get("/v3/place/around", {
+        "location": location,
+        "keywords": keywords,
+        "types": types,
+        "radius": radius,
+        "sortrule": "distance",
+        "offset": 10,
+        "page": 1
+    })
+
+async def amap_route_driving(origin: str, destination: str):
+    # https://restapi.amap.com/v3/direction/driving
+    return await _amap_get("/v3/direction/driving", {
+        "origin": origin,
+        "destination": destination,
+        "strategy": 0,
+        "extensions": "base"
+    })
+
+# -----------------------
+# PushPlus helper
+# -----------------------
+async def pushplus_notify(title: str, content: str):
+    if not PUSHPLUS_TOKEN:
+        raise RuntimeError("PUSHPLUS_TOKEN missing")
+    url = "https://www.pushplus.plus/send"
+    payload = {"token": PUSHPLUS_TOKEN, "title": title, "content": content, "template": "txt"}
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(url, json=payload)
+        r.raise_for_status()
+        return r.json()
