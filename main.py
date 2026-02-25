@@ -77,6 +77,89 @@ TOOLS = [
             "properties": {"limit": {"type": "integer", "default": 10}},
         },
     },
+
+{
+    "name": "amap_geocode",
+    "description": "把地址转换为经纬度（高德地理编码）",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "address": {"type": "string", "description": "详细地址/地点名"},
+            "city": {"type": "string", "description": "可选，城市（中文名或adcode）"}
+        },
+        "required": ["address"]
+    }
+},
+{
+    "name": "amap_reverse_geocode",
+    "description": "把经纬度转换为地址（高德逆地理编码）",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "lat": {"type": "number", "description": "纬度"},
+            "lng": {"type": "number", "description": "经度"},
+            "radius": {"type": "integer", "description": "可选，搜索半径，米", "default": 200}
+        },
+        "required": ["lat", "lng"]
+    }
+},
+{
+    "name": "amap_weather",
+    "description": "查询天气（高德天气查询）",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "city": {"type": "string", "description": "城市adcode或中文名（建议adcode）"},
+            "extensions": {"type": "string", "description": "base=实况，all=预报", "enum": ["base", "all"], "default": "base"}
+        },
+        "required": ["city"]
+    }
+},
+{
+    "name": "amap_poi_around",
+    "description": "附近搜索POI（高德周边搜索）",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "lat": {"type": "number", "description": "纬度"},
+            "lng": {"type": "number", "description": "经度"},
+            "keywords": {"type": "string", "description": "关键词，如：咖啡/便利店/地铁站"},
+            "radius": {"type": "integer", "description": "半径米，默认1000", "default": 1000},
+            "types": {"type": "string", "description": "可选，POI类型代码（高德types）"},
+            "page": {"type": "integer", "default": 1},
+            "offset": {"type": "integer", "default": 10}
+        },
+        "required": ["lat", "lng"]
+    }
+},
+{
+    "name": "amap_route_driving",
+    "description": "驾车路线规划（高德驾车路径规划）",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "origin_lat": {"type": "number"},
+            "origin_lng": {"type": "number"},
+            "dest_lat": {"type": "number"},
+            "dest_lng": {"type": "number"},
+            "strategy": {"type": "integer", "description": "路线策略，默认0（速度优先）", "default": 0}
+        },
+        "required": ["origin_lat", "origin_lng", "dest_lat", "dest_lng"]
+    }
+},
+{
+    "name": "pushplus_notify",
+    "description": "推送一条消息到PushPlus（需要PUSHPLUS_TOKEN）",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "content": {"type": "string"},
+            "template": {"type": "string", "enum": ["txt", "html", "markdown", "json"], "default": "txt"}
+        },
+        "required": ["title", "content"]
+    }
+},
 ]
 
 # ---------- SSE sessions ----------
@@ -493,13 +576,6 @@ async def debug_embedding_dim():
         return {"error": str(e), "type": e.__class__.__name__}
 
 # ---------- Debug endpoints ----------
-@app.get("/debug/embedding_dim")
-async def debug_embedding_dim():
-    try:
-        vec = await embed_text("测试一下维度")
-        return {"dim": len(vec), "head": vec[:5], "model": EMBEDDING_MODEL, "api": OPENAI_API_URL}
-    except Exception as e:
-        return {"error": str(e), "type": e.__class__.__name__}
 
 @app.get("/debug/vector_search")
 async def debug_vector_search(q: str = "测试", k: int = 5):
