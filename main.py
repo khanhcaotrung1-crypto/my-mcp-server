@@ -561,70 +561,75 @@ async def handle_rpc(payload: dict):
                 )
 
 
+            
+            # -----------------
+            # AMap tools
+            # -----------------
             if name == "amap_geocode":
                 address = (arguments.get("address") or "").strip()
                 city = (arguments.get("city") or "").strip() or None
                 if not address:
                     return jsonrpc_error(_id, -32602, "address required")
                 data = await amap_geocode(address=address, city=city)
-                return jsonrpc_result(_id, {"content": [{"type":"text","text": json.dumps(data, ensure_ascii=False)}]})
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]})
 
             if name == "amap_reverse_geocode":
-                location = (arguments.get("location") or "").strip()  # "lng,lat"
+                # allow either "location" ("lng,lat") or ("lng","lat")
+                location = (arguments.get("location") or "").strip()
                 if not location:
-                    return jsonrpc_error(_id, -32602, "location required (lng,lat)")
-                data = await amap_reverse_geocode(location=location)
-                return jsonrpc_result(_id, {"content": [{"type":"text","text": json.dumps(data, ensure_ascii=False)}]})
+                    lng = arguments.get("lng")
+                    lat = arguments.get("lat")
+                    if lng is not None and lat is not None:
+                        location = f"{lng},{lat}"
+                if not location:
+                    return jsonrpc_error(_id, -32602, "location required (lng,lat) or lng+lat")
+                radius = int(arguments.get("radius") or 1000)
+                extensions = (arguments.get("extensions") or "base").strip() or "base"
+                data = await amap_reverse_geocode(location=location, radius=radius, extensions=extensions)
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]})
 
             if name == "amap_weather":
-                city = (arguments.get("city") or "").strip()  # adcode or cityname
-                extensions = (arguments.get("extensions") or "base").strip()  # base|all
+                city = (arguments.get("city") or "").strip()
                 if not city:
-                    return jsonrpc_error(_id, -32602, "city required (adcode or cityname)")
+                    return jsonrpc_error(_id, -32602, "city (adcode or city name) required")
+                extensions = (arguments.get("extensions") or "base").strip() or "base"
                 data = await amap_weather(city=city, extensions=extensions)
-                return jsonrpc_result(_id, {"content": [{"type":"text","text": json.dumps(data, ensure_ascii=False)}]})
-                
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]})
+
             if name == "amap_poi_around":
-                location = (arguments.get("location") or "").strip()  # "lng,lat"
-            
-            # 兼容 RikkaHub 传 lat/lng
-            if not location:
-            lng = arguments.get("lng")
-            lat = arguments.get("lat")
-            if lng is not None and lat is not None:
-                location = f"{lng},{lat}"
-                address = (arguments.get("address") or "").strip()
+                # allow either "location" ("lng,lat") or ("lng","lat")
+                location = (arguments.get("location") or "").strip()
+                if not location:
+                    lng = arguments.get("lng")
+                    lat = arguments.get("lat")
+                    if lng is not None and lat is not None:
+                        location = f"{lng},{lat}"
+                if not location:
+                    return jsonrpc_error(_id, -32602, "location or lng+lat required")
                 keywords = (arguments.get("keywords") or "").strip() or None
                 types = (arguments.get("types") or "").strip() or None
                 radius = int(arguments.get("radius") or 3000)
-                
-                # 如果给的是地址 就自动 geocode
-                if address:
-                    geo = await amap_geocode(address=address)
-                    if geo.get("geocodes"):
-                        location = geo["geocodes"][0]["location"]
-                
-                if not location:
-                    return jsonrpc_error(_id, -32602, "location or address required")
-                
-                data = await amap_poi_around(
-                    location=location,
-                    keywords=keywords,
-                    types=types,
-                    radius=radius
-                )
-                
-                return jsonrpc_result(_id, {
-                    "content":[{"type":"text","text":json.dumps(data,ensure_ascii=False)}]
-                })
+                data = await amap_poi_around(location=location, keywords=keywords, types=types, radius=radius)
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]})
 
             if name == "amap_route_driving":
+                # allow either origin/destination ("lng,lat") or (origin_lng/origin_lat + destination_lng/destination_lat)
                 origin = (arguments.get("origin") or "").strip()
                 destination = (arguments.get("destination") or "").strip()
+                if not origin:
+                    olng = arguments.get("origin_lng")
+                    olat = arguments.get("origin_lat")
+                    if olng is not None and olat is not None:
+                        origin = f"{olng},{olat}"
+                if not destination:
+                    dlng = arguments.get("destination_lng")
+                    dlat = arguments.get("destination_lat")
+                    if dlng is not None and dlat is not None:
+                        destination = f"{dlng},{dlat}"
                 if not origin or not destination:
-                    return jsonrpc_error(_id, -32602, "origin/destination required (lng,lat)")
+                    return jsonrpc_error(_id, -32602, "origin/destination required (lng,lat) or origin_* + destination_*")
                 data = await amap_route_driving(origin=origin, destination=destination)
-                return jsonrpc_result(_id, {"content": [{"type":"text","text": json.dumps(data, ensure_ascii=False)}]})
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]})
 
             if name == "pushplus_notify":
                 title = (arguments.get("title") or "RikkaHub 通知").strip()
