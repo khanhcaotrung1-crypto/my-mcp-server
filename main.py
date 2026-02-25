@@ -2,7 +2,8 @@ import os
 import json
 import asyncio
 import uuid
-from datetime import datetime
+import re
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, List
 
 import httpx
@@ -160,6 +161,50 @@ TOOLS = [
             "template": {"type": "string", "enum": ["txt", "html", "markdown", "json"], "default": "txt"}
         },
         "required": ["title", "content"]
+    }
+},
+{
+    "name": "schedule_pushplus",
+    "description": "创建/更新一个 PushPlus 定时推送任务。run_at 为 ISO 时间字符串（例如 2026-02-25 08:30:00+08:00 或 2026-02-25T08:30:00+08:00）。repeat 可选：none/daily/weekly/hourly。",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "content": {"type": "string"},
+            "run_at": {"type": "string"},
+            "repeat": {"type": "string", "enum": ["none", "hourly", "daily", "weekly"], "default": "none"},
+            "template": {"type": "string", "enum": ["txt", "html", "markdown", "json"], "default": "txt"}
+        },
+        "required": ["title", "content", "run_at"]
+    }
+},
+{
+    "name": "list_pushplus_schedules",
+    "description": "列出 PushPlus 定时推送任务。",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "limit": {"type": "integer", "default": 20}
+        }
+    }
+},
+{
+    "name": "cancel_pushplus_schedule",
+    "description": "取消（禁用）一个 PushPlus 定时推送任务。",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string"}
+        },
+        "required": ["id"]
+    }
+},
+{
+    "name": "run_due_pushplus",
+    "description": "立即执行所有到期的 PushPlus 任务（通常给 /cron/tick 用）。",
+    "inputSchema": {
+        "type": "object",
+        "properties": {}
     }
 },
 ]
@@ -638,8 +683,34 @@ async def handle_rpc(payload: dict):
                     return jsonrpc_error(_id, -32602, "content required")
                 data = await pushplus_notify(title=title, content=content)
                 return jsonrpc_result(_id, {"content": [{"type":"text","text": json.dumps(data, ensure_ascii=False)}]})
+            if name == "schedule_pushplus":
+                title = (arguments.get("title") or "").strip()
+                content = (arguments.get("content") or "").strip()
+                run_at = (arguments.get("run_at") or "").strip()
+                repeat = (arguments.get("repeat") or "none").strip().lower()
+                template = (arguments.get("template") or "txt").strip().lower()
 
+                if not title or not content or not run_at:
+                    return jsonrpc_error(_id, -32602, "title/content/run_at required")
 
+                job = await create_push_schedule(title=title, content=content, run_at=run_at, repeat=repeat, template=template)
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(job, ensure_ascii=False)}]})
+
+            if name == "list_pushplus_schedules":
+                limit = int(arguments.get("limit") or 20)
+                jobs = await list_push_schedules(limit=limit)
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(jobs, ensure_ascii=False)}]})
+
+            if name == "cancel_pushplus_schedule":
+                job_id = (arguments.get("id") or "").strip()
+                if not job_id:
+                    return jsonrpc_error(_id, -32602, "id required")
+                out = await cancel_push_schedule(job_id)
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(out, ensure_ascii=False)}]})
+
+            if name == "run_due_pushplus":
+                out = await run_due_push_schedules()
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(out, ensure_ascii=False)}]})
             return jsonrpc_error(_id, -32601, f"Unknown tool: {name}")
 
         except Exception as e:
@@ -679,6 +750,20 @@ def debug_sql_snippet():
             "alter table memories alter column embedding type vector(1024);",
             "create index if not exists memories_embedding_idx on memories using ivfflat (embedding vector_cosine_ops) with (lists = 100);",
             'create or replace function match_memories(\n  query_embedding vector(1024),\n  match_count int default 5\n)\nreturns table(\n  id uuid,\n  title text,\n  content text,\n  category text,\n  importance int,\n  created_at timestamptz,\n  similarity float\n)\nlanguage sql stable\nas $$\n  select\n    m.id,\n    m.title,\n    m.content,\n    m.category,\n    m.importance,\n    m.created_at,\n    1 - (m.embedding <=> query_embedding) as similarity\n  from memories m\n  where m.embedding is not null\n  order by m.embedding <=> query_embedding\n  limit match_count;\n$$;',
+"",
+"-- PushPlus schedules (for /cron/tick)",
+"create table if not exists push_schedules (",
+"  id uuid primary key default gen_random_uuid(),",
+"  title text not null,",
+"  content text not null,",
+"  template text not null default 'txt',",
+"  run_at timestamptz not null,",
+"  repeat text not null default 'none',",
+"  enabled boolean not null default true,",
+"  last_run_at timestamptz,",
+"  created_at timestamptz not null default now()",
+");",
+"create index if not exists push_schedules_run_at_idx on push_schedules (run_at) where enabled = true;",
         ],
     }
 
@@ -746,3 +831,137 @@ async def pushplus_notify(title: str, content: str):
         r = await client.post(url, json=payload)
         r.raise_for_status()
         return r.json()
+# ----------------------------
+# PushPlus scheduler (simple)
+# ----------------------------
+
+PUSH_SCHEDULE_TABLE = os.getenv("PUSH_SCHEDULE_TABLE", "push_schedules")
+CRON_SECRET = os.getenv("CRON_SECRET", "").strip()
+
+def _parse_run_at(run_at: str) -> str:
+    """
+    Accepts:
+      - 2026-02-25 08:30:00+08:00
+      - 2026-02-25T08:30:00+08:00
+      - 2026-02-25 08:30:00  (treated as Asia/Shanghai +08:00)
+      - 2026-02-25T08:30:00 (treated as Asia/Shanghai +08:00)
+    Returns ISO string with offset.
+    """
+    s = run_at.strip()
+    s = s.replace(" ", "T", 1) if " " in s and "T" not in s else s
+    if s.endswith("Z") or re.search(r"[+-]\d\d:\d\d$", s):
+        return s
+    # naive -> assume +08:00
+    return s + "+08:00"
+
+def _next_run_iso(prev_run_iso: str, repeat: str) -> str | None:
+    try:
+        # python 3.11: fromisoformat accepts "+08:00"
+        dt = datetime.fromisoformat(prev_run_iso.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+    repeat = (repeat or "none").lower()
+    if repeat == "hourly":
+        dt = dt + timedelta(hours=1)
+    elif repeat == "daily":
+        dt = dt + timedelta(days=1)
+    elif repeat == "weekly":
+        dt = dt + timedelta(days=7)
+    else:
+        return None
+    return dt.isoformat()
+
+async def create_push_schedule(*, title: str, content: str, run_at: str, repeat: str = "none", template: str = "txt") -> dict:
+    run_at_iso = _parse_run_at(run_at)
+    payload = {
+        "title": title,
+        "content": content,
+        "run_at": run_at_iso,
+        "repeat": (repeat or "none").lower(),
+        "template": (template or "txt").lower(),
+        "enabled": True,
+    }
+    url = f"{SUPABASE_URL}/rest/v1/{PUSH_SCHEDULE_TABLE}"
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(url, headers={**supabase_headers(), "Prefer": "return=representation"}, json=payload)
+        r.raise_for_status()
+        rows = r.json()
+        return rows[0] if rows else payload
+
+async def list_push_schedules(*, limit: int = 20) -> list[dict]:
+    url = f"{SUPABASE_URL}/rest/v1/{PUSH_SCHEDULE_TABLE}"
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(
+            url,
+            headers=supabase_headers(),
+            params={"select": "id,title,run_at,repeat,enabled,created_at,last_run_at", "order": "created_at.desc", "limit": str(limit)},
+        )
+        r.raise_for_status()
+        return r.json()
+
+async def cancel_push_schedule(job_id: str) -> dict:
+    url = f"{SUPABASE_URL}/rest/v1/{PUSH_SCHEDULE_TABLE}"
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.patch(
+            url,
+            headers={**supabase_headers(), "Prefer": "return=representation"},
+            params={"id": f"eq.{job_id}"},
+            json={"enabled": False},
+        )
+        r.raise_for_status()
+        rows = r.json()
+        return rows[0] if rows else {"id": job_id, "enabled": False}
+
+async def run_due_push_schedules() -> dict:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    url = f"{SUPABASE_URL}/rest/v1/{PUSH_SCHEDULE_TABLE}"
+    sent = 0
+    touched = 0
+    errors: list[dict] = []
+
+    async with httpx.AsyncClient(timeout=45) as client:
+        r = await client.get(
+            url,
+            headers=supabase_headers(),
+            params={
+                "select": "id,title,content,run_at,repeat,template,enabled",
+                "enabled": "eq.true",
+                "run_at": f"lte.{now_iso}",
+                "order": "run_at.asc",
+                "limit": "50",
+            },
+        )
+        r.raise_for_status()
+        jobs = r.json()
+
+        for job in jobs:
+            touched += 1
+            job_id = job["id"]
+            try:
+                await pushplus_notify(title=job["title"], content=job["content"], template=job.get("template") or "txt")
+                sent += 1
+                nxt = _next_run_iso(_parse_run_at(job["run_at"]), job.get("repeat") or "none")
+                patch = {
+                    "last_run_at": now_iso,
+                    "run_at": nxt if nxt else job["run_at"],
+                    "enabled": True if nxt else False,
+                }
+                rr = await client.patch(
+                    url,
+                    headers={**supabase_headers(), "Prefer": "return=minimal"},
+                    params={"id": f"eq.{job_id}"},
+                    json=patch,
+                )
+                rr.raise_for_status()
+            except Exception as e:
+                errors.append({"id": job_id, "error": str(e)})
+
+    return {"now": now_iso, "checked": len(jobs), "sent": sent, "touched": touched, "errors": errors}
+
+@app.get("/cron/tick")
+async def cron_tick(secret: str = ""):
+    # 用外部定时器（cron-job.org / UptimeRobot / GitHub Actions）每分钟打这个接口
+    if CRON_SECRET and secret != CRON_SECRET:
+        raise HTTPException(status_code=401, detail="bad secret")
+    return await run_due_push_schedules()
