@@ -404,6 +404,11 @@ def _supabase_headers():
     }
 
 
+# 兼容别名：旧代码里用的是 supabase_headers()
+def supabase_headers():
+    return _supabase_headers()
+
+
 async def supabase_insert_memory(
     title: str,
     content: str,
