@@ -715,7 +715,9 @@ async def handle_rpc(payload: dict):
             return jsonrpc_error(_id, -32601, f"Unknown tool: {name}")
 
         except Exception as e:
-            return jsonrpc_error(_id, -32000, "Tool execution error", data=str(e))
+            import traceback as _tb
+            _tb.print_exc()
+            return jsonrpc_error(_id, -32000, f"Tool execution error: {e}", data=_tb.format_exc())
 
     return jsonrpc_error(_id, -32601, f"Method not found: {method}")
 
