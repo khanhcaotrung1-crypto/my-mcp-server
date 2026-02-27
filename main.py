@@ -830,7 +830,7 @@ async def amap_route_driving(origin: str, destination: str):
 # -----------------------
 # PushPlus helper
 # -----------------------
-async def pushplus_notify(title: str, content: str):
+async def pushplus_notify(title: str, content: str, template: str = "txt"):
     if not PUSHPLUS_TOKEN:
         raise RuntimeError("PUSHPLUS_TOKEN missing")
     url = "https://www.pushplus.plus/send"
