@@ -429,7 +429,8 @@ async def supabase_insert_memory(
     if importance is not None:
         payload["importance"] = importance
     if embedding_vec is not None:
-        payload["embedding"] = _vec_to_pgvector_literal(embedding_vec)
+        # PostgREST REST insert 需要传 JSON 数组，不能用 pgvector 字符串格式
+        payload["embedding"] = embedding_vec
 
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(url, headers=_supabase_headers(), json=payload)
@@ -519,7 +520,8 @@ async def supabase_vector_search(query_embedding: List[float], k: int = 5):
     """
     url = f"{SUPABASE_URL}/rest/v1/rpc/match_memories"
     payload = {
-        "query_embedding": _vec_to_pgvector_literal(query_embedding),
+        # PostgREST RPC 调用 vector 参数需要传 JSON 数组，不能用 pgvector 字符串格式
+        "query_embedding": query_embedding,
         "match_count": max(1, min(k, 20)),
     }
     async with httpx.AsyncClient(timeout=30) as client:
@@ -836,8 +838,17 @@ async def amap_route_driving(origin: str, destination: str):
 async def pushplus_notify(title: str, content: str, template: str = "txt"):
     if not PUSHPLUS_TOKEN:
         raise RuntimeError("PUSHPLUS_TOKEN missing")
+
     url = "https://www.pushplus.plus/send"
-    payload = {"token": PUSHPLUS_TOKEN, "title": title, "content": content, "template": "txt"}
+
+    payload = {
+        "token": PUSHPLUS_TOKEN,
+        "title": title,
+        "content": content,
+        "template": template,
+        "channel": "app"
+    }
+
     async with httpx.AsyncClient(timeout=20) as client:
         r = await client.post(url, json=payload)
         r.raise_for_status()
