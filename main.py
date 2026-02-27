@@ -4,6 +4,9 @@ import asyncio
 import uuid
 import re
 from datetime import datetime, timezone, timedelta
+
+SH_TZ = timezone(timedelta(hours=8))  # Asia/Shanghai fixed offset
+
 import datetime as dt
 from typing import Any, Dict, Optional, List
 
@@ -833,17 +836,8 @@ async def amap_route_driving(origin: str, destination: str):
 async def pushplus_notify(title: str, content: str, template: str = "txt"):
     if not PUSHPLUS_TOKEN:
         raise RuntimeError("PUSHPLUS_TOKEN missing")
-
     url = "https://www.pushplus.plus/send"
-
-    payload = {
-        "token": PUSHPLUS_TOKEN,
-        "title": title,
-        "content": content,
-        "template": template,
-        "channel": "app"
-    }
-
+    payload = {"token": PUSHPLUS_TOKEN, "title": title, "content": content, "template": "txt"}
     async with httpx.AsyncClient(timeout=20) as client:
         r = await client.post(url, json=payload)
         r.raise_for_status()
@@ -871,23 +865,45 @@ def _parse_run_at(run_at: str) -> str:
     # naive -> assume +08:00
     return s + "+08:00"
 
-def _next_run_iso(prev_run_iso: str, repeat: str) -> str | None:
+def _next_run_iso(prev_run_iso: str, repeat: str, now_iso_utc: str) -> str | None:
+    """Return the *next* run_at strictly after `now_iso_utc` (UTC), keeping the original local time-of-day.
+
+    Why: if a daily job is months behind, doing +1 day will spam (catch-up loop). We instead jump to the next occurrence.
+    """
     try:
-        # python 3.11: fromisoformat accepts "+08:00"
-        dt = datetime.fromisoformat(prev_run_iso.replace("Z", "+00:00"))
+        prev_dt_utc = datetime.fromisoformat(prev_run_iso.replace("Z", "+00:00")).astimezone(timezone.utc)
+        now_dt_utc = datetime.fromisoformat(now_iso_utc.replace("Z", "+00:00")).astimezone(timezone.utc)
     except Exception:
         return None
 
     repeat = (repeat or "none").lower()
+    # derive desired local time-of-day (Asia/Shanghai) from previous run_at
+    prev_local = prev_dt_utc.astimezone(SH_TZ)
+    now_local = now_dt_utc.astimezone(SH_TZ)
+
     if repeat == "hourly":
-        dt = dt + timedelta(hours=1)
+        cand = now_local.replace(minute=prev_local.minute, second=prev_local.second, microsecond=0)
+        if cand <= now_local:
+            cand = cand + timedelta(hours=1)
+
     elif repeat == "daily":
-        dt = dt + timedelta(days=1)
+        cand = now_local.replace(hour=prev_local.hour, minute=prev_local.minute, second=prev_local.second, microsecond=0)
+        if cand <= now_local:
+            cand = cand + timedelta(days=1)
+
     elif repeat == "weekly":
-        dt = dt + timedelta(days=7)
+        # next same weekday + time
+        cand = now_local.replace(hour=prev_local.hour, minute=prev_local.minute, second=prev_local.second, microsecond=0)
+        target_wd = prev_local.weekday()  # Monday=0
+        days_ahead = (target_wd - cand.weekday()) % 7
+        if days_ahead == 0 and cand <= now_local:
+            days_ahead = 7
+        cand = cand + timedelta(days=days_ahead)
+
     else:
         return None
-    return dt.isoformat()
+
+    return cand.astimezone(timezone.utc).isoformat()
 
 async def create_push_schedule(*, title: str, content: str, run_at: str, repeat: str = "none", template: str = "txt") -> dict:
     run_at_iso = _parse_run_at(run_at)
@@ -1024,7 +1040,7 @@ async def run_due_push_schedules() -> dict:
                 if repeat and repeat != "none":
                     # Keep the same clock time by stepping from the *previous run_at*
                     prev_run_at = job.get("run_at") or now_iso
-                    patch["run_at"] = _next_run_iso(prev_run_at, repeat)
+                    patch["run_at"] = _next_run_iso(prev_run_at, repeat, now_iso)
                     patch["status"] = "pending"
                     patch["enabled"] = True
                 else:
