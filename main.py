@@ -833,8 +833,17 @@ async def amap_route_driving(origin: str, destination: str):
 async def pushplus_notify(title: str, content: str, template: str = "txt"):
     if not PUSHPLUS_TOKEN:
         raise RuntimeError("PUSHPLUS_TOKEN missing")
+
     url = "https://www.pushplus.plus/send"
-    payload = {"token": PUSHPLUS_TOKEN, "title": title, "content": content, "template": "txt"}
+
+    payload = {
+        "token": PUSHPLUS_TOKEN,
+        "title": title,
+        "content": content,
+        "template": template,
+        "channel": "app"
+    }
+
     async with httpx.AsyncClient(timeout=20) as client:
         r = await client.post(url, json=payload)
         r.raise_for_status()
