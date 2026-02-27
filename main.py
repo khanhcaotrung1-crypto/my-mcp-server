@@ -665,7 +665,9 @@ async def handle_rpc(payload: dict):
                 keywords = (arguments.get("keywords") or "").strip() or None
                 types = (arguments.get("types") or "").strip() or None
                 radius = int(arguments.get("radius") or 3000)
-                data = await amap_poi_around(location=location, keywords=keywords, types=types, radius=radius)
+                page = int(arguments.get("page") or 1)
+                offset = int(arguments.get("offset") or 10)
+                data = await amap_poi_around(location=location, keywords=keywords, types=types, radius=radius, page=page, offset=offset)
                 return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]})
 
             if name == "amap_route_driving":
@@ -801,9 +803,11 @@ async def amap_geocode(address: str, city: Optional[str] = None):
     # https://restapi.amap.com/v3/geocode/geo
     return await _amap_get("/v3/geocode/geo", {"address": address, "city": city})
 
-async def amap_reverse_geocode(location: str):
+async def amap_reverse_geocode(location: str, radius: int = 1000, extensions: str = "all"):
     # https://restapi.amap.com/v3/geocode/regeo
-    return await _amap_get("/v3/geocode/regeo", {"location": location, "radius": 1000, "extensions": "all"})
+    if extensions not in ("base", "all"):
+        extensions = "all"
+    return await _amap_get("/v3/geocode/regeo", {"location": location, "radius": radius, "extensions": extensions})
 
 async def amap_weather(city: str, extensions: str = "base"):
     # https://restapi.amap.com/v3/weather/weatherInfo
@@ -811,7 +815,7 @@ async def amap_weather(city: str, extensions: str = "base"):
         extensions = "base"
     return await _amap_get("/v3/weather/weatherInfo", {"city": city, "extensions": extensions})
 
-async def amap_poi_around(location: str, keywords: Optional[str] = None, types: Optional[str] = None, radius: int = 3000):
+async def amap_poi_around(location: str, keywords: Optional[str] = None, types: Optional[str] = None, radius: int = 3000, page: int = 1, offset: int = 10):
     # https://restapi.amap.com/v3/place/around
     return await _amap_get("/v3/place/around", {
         "location": location,
@@ -819,8 +823,8 @@ async def amap_poi_around(location: str, keywords: Optional[str] = None, types: 
         "types": types,
         "radius": radius,
         "sortrule": "distance",
-        "offset": 10,
-        "page": 1
+        "offset": offset,
+        "page": page
     })
 
 async def amap_route_driving(origin: str, destination: str):
