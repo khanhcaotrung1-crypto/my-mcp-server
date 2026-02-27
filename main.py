@@ -927,103 +927,103 @@ async def run_due_push_schedules() -> dict:
     Returns a dict for debugging (never raises to FastAPI).
     """
     now_iso = dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    async with httpx.AsyncClient(timeout=30.0) as client:
 
-    # Safety wrapper: never crash cron tick
-    try:
-        url = f"{SUPABASE_URL}/rest/v1/push_schedules"
-        params = {
-            "select": "*",
-            "enabled": "eq.true",
-            "run_at": f"lte.{now_iso}",
-            "order": "run_at.asc",
-            "limit": "50",
-        }
-        r = await http.get(url, headers=supabase_headers(), params=params, timeout=20.0)
-    except Exception as e:
-        return {
-            "ok": False,
-            "now": now_iso,
-            "stage": "fetch_due_jobs",
-            "error": f"{type(e).__name__}: {e}",
-        }
+            # Safety wrapper: never crash cron tick
+            try:
+                url = f"{SUPABASE_URL}/rest/v1/push_schedules"
+                params = {
+                    "select": "*",
+                    "enabled": "eq.true",
+                    "run_at": f"lte.{now_iso}",
+                    "order": "run_at.asc",
+                    "limit": "50",
+                }
+                r = await client.get(url, headers=supabase_headers(), params=params, timeout=20.0)
+            except Exception as e:
+                return {
+                    "ok": False,
+                    "now": now_iso,
+                    "stage": "fetch_due_jobs",
+                    "error": f"{type(e).__name__}: {e}",
+                }
 
-    if r.status_code >= 400:
-        # Include body for diagnosis (common: 401/404/RLS)
-        return {
-            "ok": False,
-            "now": now_iso,
-            "stage": "fetch_due_jobs",
-            "http_status": r.status_code,
-            "body": r.text[:2000],
-        }
+            if r.status_code >= 400:
+                # Include body for diagnosis (common: 401/404/RLS)
+                return {
+                    "ok": False,
+                    "now": now_iso,
+                    "stage": "fetch_due_jobs",
+                    "http_status": r.status_code,
+                    "body": r.text[:2000],
+                }
 
-    try:
-        jobs = r.json() or []
-    except Exception as e:
-        return {
-            "ok": False,
-            "now": now_iso,
-            "stage": "parse_due_jobs",
-            "http_status": r.status_code,
-            "body": r.text[:2000],
-            "error": f"{type(e).__name__}: {e}",
-        }
+            try:
+                jobs = r.json() or []
+            except Exception as e:
+                return {
+                    "ok": False,
+                    "now": now_iso,
+                    "stage": "parse_due_jobs",
+                    "http_status": r.status_code,
+                    "body": r.text[:2000],
+                    "error": f"{type(e).__name__}: {e}",
+                }
 
-    sent = 0
-    touched = 0
-    errors = []
+            sent = 0
+            touched = 0
+            errors = []
 
-    for job in jobs:
-        job_id = job.get("id")
-        title = job.get("title") or "提醒"
-        content = job.get("content") or ""
-        template = job.get("template") or "html"
+            for job in jobs:
+                job_id = job.get("id")
+                title = job.get("title") or "提醒"
+                content = job.get("content") or ""
+                template = job.get("template") or "html"
 
-        try:
-            await pushplus_notify(title=title, content=content, template=template)
-            sent += 1
-        except Exception as e:
-            errors.append({"id": str(job_id), "stage": "pushplus", "error": f"{type(e).__name__}: {e}"})
+                try:
+                    await pushplus_notify(title=title, content=content, template=template)
+                    sent += 1
+                except Exception as e:
+                    errors.append({"id": str(job_id), "stage": "pushplus", "error": f"{type(e).__name__}: {e}"})
 
-        # Mark last_run_at / schedule next
-        try:
-            patch = {"last_run_at": now_iso}
-            repeat = (job.get("repeat") or "").strip().lower()
+                # Mark last_run_at / schedule next
+                try:
+                    patch = {"last_run_at": now_iso}
+                    repeat = (job.get("repeat") or "").strip().lower()
 
-            next_run = None
-            if repeat in {"minutely", "minute"}:
-                next_run = dt.datetime.utcnow() + dt.timedelta(minutes=1)
-            elif repeat in {"hourly", "hour"}:
-                next_run = dt.datetime.utcnow() + dt.timedelta(hours=1)
-            elif repeat in {"daily", "day"}:
-                next_run = dt.datetime.utcnow() + dt.timedelta(days=1)
-            elif repeat in {"weekly", "week"}:
-                next_run = dt.datetime.utcnow() + dt.timedelta(days=7)
+                    next_run = None
+                    if repeat in {"minutely", "minute"}:
+                        next_run = dt.datetime.utcnow() + dt.timedelta(minutes=1)
+                    elif repeat in {"hourly", "hour"}:
+                        next_run = dt.datetime.utcnow() + dt.timedelta(hours=1)
+                    elif repeat in {"daily", "day"}:
+                        next_run = dt.datetime.utcnow() + dt.timedelta(days=1)
+                    elif repeat in {"weekly", "week"}:
+                        next_run = dt.datetime.utcnow() + dt.timedelta(days=7)
 
-            if next_run is not None:
-                patch["run_at"] = next_run.replace(microsecond=0).isoformat() + "Z"
-            else:
-                patch["enabled"] = False
+                    if next_run is not None:
+                        patch["run_at"] = next_run.replace(microsecond=0).isoformat() + "Z"
+                    else:
+                        patch["enabled"] = False
 
-            pr = await http.patch(
-                f"{SUPABASE_URL}/rest/v1/push_schedules?id=eq.{job_id}",
-                headers=supabase_headers(),
-                json=patch,
-                timeout=20.0,
-            )
-            touched += 1
-            if pr.status_code >= 400:
-                errors.append({
-                    "id": str(job_id),
-                    "stage": "update_job",
-                    "http_status": pr.status_code,
-                    "body": pr.text[:800],
-                })
-        except Exception as e:
-            errors.append({"id": str(job_id), "stage": "update_job", "error": f"{type(e).__name__}: {e}"})
+                    pr = await client.patch(
+                        f"{SUPABASE_URL}/rest/v1/push_schedules?id=eq.{job_id}",
+                        headers=supabase_headers(),
+                        json=patch,
+                        timeout=20.0,
+                    )
+                    touched += 1
+                    if pr.status_code >= 400:
+                        errors.append({
+                            "id": str(job_id),
+                            "stage": "update_job",
+                            "http_status": pr.status_code,
+                            "body": pr.text[:800],
+                        })
+                except Exception as e:
+                    errors.append({"id": str(job_id), "stage": "update_job", "error": f"{type(e).__name__}: {e}"})
 
-    return {"ok": True, "now": now_iso, "checked": len(jobs), "sent": sent, "touched": touched, "errors": errors}
-
+            return {"ok": True, "now": now_iso, "checked": len(jobs), "sent": sent, "touched": touched, "errors": errors}
 
 
 @app.get("/cron/health")
