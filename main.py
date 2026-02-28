@@ -1238,6 +1238,9 @@ async def run_due_push_schedules() -> dict:
 @app.get("/cron/tick")
 async def cron_tick(secret: str = ""):
     # 用外部定时器（cron-job.org / UptimeRobot / GitHub Actions）每分钟打这个接口
+@app.get("/debug/todoist")
+def debug_todoist():
+    return {"TODOIST_BASE": TODOIST_BASE, "token_set": bool(TODOIST_API_TOKEN)}
     if CRON_SECRET and secret != CRON_SECRET:
         raise HTTPException(status_code=401, detail="bad secret")
     return await run_due_push_schedules()
