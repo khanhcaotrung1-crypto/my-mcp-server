@@ -48,7 +48,7 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY") or ""
 AMAP_KEY = os.getenv("AMAP_KEY") or ""
 PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN") or ""
 TODOIST_API_TOKEN = (os.getenv("TODOIST_API_TOKEN") or "").strip()
-TODOIST_BASE = "https://api.todoist.com/rest/v2"
+TODOIST_BASE = "https://api.todoist.com/rest/v1"
 
 def _todoist_headers():
     if not TODOIST_API_TOKEN:
