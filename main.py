@@ -47,6 +47,26 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL") or "text-embedding-3-small"  # de
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY") or ""
 AMAP_KEY = os.getenv("AMAP_KEY") or ""
 PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN") or ""
+TODOIST_API_TOKEN = (os.getenv("TODOIST_API_TOKEN") or "").strip()
+TODOIST_BASE = "https://api.todoist.com/rest/v2"
+
+def _todoist_headers():
+    if not TODOIST_API_TOKEN:
+        raise RuntimeError("TODOIST_API_TOKEN missing")
+    return {
+        "Authorization": f"Bearer {TODOIST_API_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+async def todoist_request(method: str, path: str, *, params=None, json_body=None):
+    url = f"{TODOIST_BASE}{path}"
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.request(method, url, headers=_todoist_headers(), params=params, json=json_body)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Todoist API {r.status_code}: {r.text}")
+    if r.status_code == 204:
+        return {"ok": True}
+    return r.json()
 
 # ---------- MCP tool definitions ----------
 TOOLS = [
@@ -209,6 +229,77 @@ TOOLS = [
     "inputSchema": {
         "type": "object",
         "properties": {}
+    }
+},
+{
+    "name": "todoist_create_task",
+    "description": "在 Todoist 创建任务",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "content": {"type": "string", "description": "任务标题"},
+            "description": {"type": "string"},
+            "project_id": {"type": "string"},
+            "section_id": {"type": "string"},
+            "parent_id": {"type": "string"},
+            "labels": {"type": "array", "items": {"type": "string"}},
+            "priority": {"type": "integer", "description": "1-4", "default": 1},
+            "due_string": {"type": "string", "description": "例如: tomorrow 10am / every day"},
+            "due_date": {"type": "string", "description": "YYYY-MM-DD"},
+            "due_datetime": {"type": "string", "description": "ISO datetime"},
+            "due_timezone": {"type": "string", "description": "例如 Asia/Shanghai"}
+        },
+        "required": ["content"]
+    }
+},
+{
+    "name": "todoist_get_tasks",
+    "description": "获取 Todoist 任务列表（可按 project/filter/label 过滤）",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "project_id": {"type": "string"},
+            "filter": {"type": "string", "description": "Todoist filter 语法，例如: today & !subtask"},
+            "label": {"type": "string"},
+            "limit": {"type": "integer", "default": 50}
+        }
+    }
+},
+{
+    "name": "todoist_update_task",
+    "description": "更新 Todoist 任务（标题/描述/优先级/截止等）",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string"},
+            "content": {"type": "string"},
+            "description": {"type": "string"},
+            "labels": {"type": "array", "items": {"type": "string"}},
+            "priority": {"type": "integer"},
+            "due_string": {"type": "string"},
+            "due_date": {"type": "string"},
+            "due_datetime": {"type": "string"},
+            "due_timezone": {"type": "string"}
+        },
+        "required": ["task_id"]
+    }
+},
+{
+    "name": "todoist_complete_task",
+    "description": "把 Todoist 任务标记为完成",
+    "inputSchema": {
+        "type": "object",
+        "properties": {"task_id": {"type": "string"}},
+        "required": ["task_id"]
+    }
+},
+{
+    "name": "todoist_delete_task",
+    "description": "删除 Todoist 任务",
+    "inputSchema": {
+        "type": "object",
+        "properties": {"task_id": {"type": "string"}},
+        "required": ["task_id"]
     }
 },
 ]
@@ -618,6 +709,73 @@ async def handle_rpc(payload: dict):
 
 
             
+
+            # -----------------
+            # Todoist tools
+            # -----------------
+            if name == "todoist_create_task":
+                content = (arguments.get("content") or "").strip()
+                if not content:
+                    return jsonrpc_error(_id, -32602, "content required")
+                payload = {
+                    "content": content,
+                    "description": arguments.get("description"),
+                    "project_id": arguments.get("project_id"),
+                    "section_id": arguments.get("section_id"),
+                    "parent_id": arguments.get("parent_id"),
+                    "labels": arguments.get("labels"),
+                    "priority": arguments.get("priority"),
+                    "due_string": arguments.get("due_string"),
+                    "due_date": arguments.get("due_date"),
+                    "due_datetime": arguments.get("due_datetime"),
+                    "due_timezone": arguments.get("due_timezone"),
+                }
+                payload = {k: v for k, v in payload.items() if v is not None and v != ""}
+                data = await todoist_request("POST", "/tasks", json_body=payload)
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]})
+
+            if name == "todoist_get_tasks":
+                query_params = {}
+                if arguments.get("project_id"): query_params["project_id"] = arguments["project_id"]
+                if arguments.get("filter"): query_params["filter"] = arguments["filter"]
+                if arguments.get("label"): query_params["label"] = arguments["label"]
+                data = await todoist_request("GET", "/tasks", params=query_params)
+                limit = int(arguments.get("limit") or 50)
+                data = data[:max(1, min(limit, 200))]
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]})
+
+            if name == "todoist_update_task":
+                task_id = (arguments.get("task_id") or "").strip()
+                if not task_id:
+                    return jsonrpc_error(_id, -32602, "task_id required")
+                payload = {
+                    "content": arguments.get("content"),
+                    "description": arguments.get("description"),
+                    "labels": arguments.get("labels"),
+                    "priority": arguments.get("priority"),
+                    "due_string": arguments.get("due_string"),
+                    "due_date": arguments.get("due_date"),
+                    "due_datetime": arguments.get("due_datetime"),
+                    "due_timezone": arguments.get("due_timezone"),
+                }
+                payload = {k: v for k, v in payload.items() if v is not None}
+                data = await todoist_request("POST", f"/tasks/{task_id}", json_body=payload)
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]})
+
+            if name == "todoist_complete_task":
+                task_id = (arguments.get("task_id") or "").strip()
+                if not task_id:
+                    return jsonrpc_error(_id, -32602, "task_id required")
+                data = await todoist_request("POST", f"/tasks/{task_id}/close")
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]})
+
+            if name == "todoist_delete_task":
+                task_id = (arguments.get("task_id") or "").strip()
+                if not task_id:
+                    return jsonrpc_error(_id, -32602, "task_id required")
+                data = await todoist_request("DELETE", f"/tasks/{task_id}")
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]})
+
             # -----------------
             # AMap tools
             # -----------------
@@ -680,8 +838,8 @@ async def handle_rpc(payload: dict):
                     if olng is not None and olat is not None:
                         origin = f"{olng},{olat}"
                 if not destination:
-                    dlng = arguments.get("destination_lng")
-                    dlat = arguments.get("destination_lat")
+                    dlng = arguments.get("dest_lng")
+                    dlat = arguments.get("dest_lat")
                     if dlng is not None and dlat is not None:
                         destination = f"{dlng},{dlat}"
                 if not origin or not destination:
@@ -880,7 +1038,7 @@ def _parse_run_at(run_at: str) -> str:
     # naive -> assume +08:00
     return s + "+08:00"
 
-def _next_run_iso(prev_run_iso: str, repeat: str, now_iso_utc: str) -> str | None:
+def _next_run_iso(prev_run_iso: str, repeat: str, now_iso_utc: str) -> Optional[str]:
     """Return the *next* run_at strictly after `now_iso_utc` (UTC), keeping the original local time-of-day.
 
     Why: if a daily job is months behind, doing +1 day will spam (catch-up loop). We instead jump to the next occurrence.
