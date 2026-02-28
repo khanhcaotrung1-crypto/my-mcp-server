@@ -48,7 +48,7 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY") or ""
 AMAP_KEY = os.getenv("AMAP_KEY") or ""
 PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN") or ""
 TODOIST_API_TOKEN = (os.getenv("TODOIST_API_TOKEN") or "").strip()
-TODOIST_BASE = "https://api.todoist.com/rest/v1"
+TODOIST_BASE = "https://api.todoist.com/rest/v2"
 
 def _todoist_headers():
     if not TODOIST_API_TOKEN:
@@ -1238,3 +1238,6 @@ async def run_due_push_schedules() -> dict:
 @app.get("/cron/tick")
 async def cron_tick(secret: str = ""):
     # 用外部定时器（cron-job.org / UptimeRobot / GitHub Actions）每分钟打这个接口
+    if CRON_SECRET and secret != CRON_SECRET:
+        raise HTTPException(status_code=401, detail="bad secret")
+    return await run_due_push_schedules()
