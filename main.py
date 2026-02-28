@@ -259,6 +259,10 @@ async def mcp_entry(request: Request):
     # 1) 如果它就是 JSON-RPC（含 method 字段），直接同步返回 JSON-RPC 响应
     if isinstance(payload, dict) and payload.get("method"):
         resp = await handle_rpc(payload)
+        # 通知消息无需响应，返回空 204
+        if resp is None:
+            from fastapi.responses import Response
+            return Response(status_code=204)
         return JSONResponse(resp, status_code=200)
 
     # 2) 否则当作“握手”请求：创建 session，返回 endpoint 信息（非流式）
@@ -374,6 +378,10 @@ async def _handle_message(session_id: str, request: Request):
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
     resp = await handle_rpc(payload)
+
+    # 通知消息不需要回复，直接返回 200
+    if resp is None:
+        return JSONResponse({"ok": True}, status_code=200)
 
     # Transport style: push response through SSE, HTTP returns quickly
     await SESSIONS[session_id].put(resp)
@@ -580,9 +588,9 @@ async def handle_rpc(payload: dict):
     if method in ("tools/list", "list_tools"):
         return jsonrpc_result(_id, {"tools": TOOLS})
 
-    # MCP 协议：客户端初始化完成后会发此通知，需静默返回
-    if method in ("notifications/initialized", "notifications/cancelled"):
-        return jsonrpc_result(_id, None)
+    # MCP 协议：通知消息（notifications/*）id 为 null，按规范不能返回任何响应
+    if method is None or (isinstance(method, str) and method.startswith("notifications/")):
+        return None
 
     if method in ("tools/call", "call_tool"):
         name = params.get("name")
