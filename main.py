@@ -6,8 +6,6 @@ import re
 from datetime import datetime, timezone, timedelta
 
 SH_TZ = timezone(timedelta(hours=8))  # Asia/Shanghai fixed offset
-
-import datetime as dt
 from typing import Any, Dict, Optional, List
 
 import httpx
@@ -373,7 +371,7 @@ async def sse_stream(session_id: str):
             yield sse_data({"type": "ping", "t": datetime.now().isoformat()})
 
 
-@app.get("/mcp")
+# mcp_sse 是内部 helper，由 mcp_entry 的 GET 分支调用，不单独注册路由
 async def mcp_sse():
     session_id = uuid.uuid4().hex
     SESSIONS[session_id] = asyncio.Queue()
@@ -550,10 +548,12 @@ async def supabase_recent_memories(limit: int = 10):
 async def supabase_keyword_search(query: str, k: int = 5):
     # basic fallback if vector RPC not available
     url = f"{SUPABASE_URL}/rest/v1/memories"
+    # 转义 PostgREST 特殊字符，防止过滤表达式被破坏
+    safe_query = query.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)").replace(",", "\\,").replace("*", "\\*")
     # title/content ILIKE
     params = {
         "select": "id,title,content,category,importance,created_at",
-        "or": f"(title.ilike.*{query}*,content.ilike.*{query}*)",
+        "or": f"(title.ilike.*{safe_query}*,content.ilike.*{safe_query}*)",
         "order": "created_at.desc",
         "limit": str(max(1, min(k, 20))),
     }
@@ -645,6 +645,10 @@ async def handle_rpc(payload: dict):
     if method in ("tools/list", "list_tools"):
         return jsonrpc_result(_id, {"tools": TOOLS})
 
+    # MCP 协议：客户端初始化完成后会发此通知，需静默返回
+    if method in ("notifications/initialized", "notifications/cancelled"):
+        return jsonrpc_result(_id, None)
+
     if method in ("tools/call", "call_tool"):
         name = params.get("name")
         arguments = params.get("arguments") or {}
@@ -714,11 +718,11 @@ async def handle_rpc(payload: dict):
             # Todoist tools
             # -----------------
             if name == "todoist_create_task":
-                content = (arguments.get("content") or "").strip()
-                if not content:
+                task_content = (arguments.get("content") or "").strip()
+                if not task_content:
                     return jsonrpc_error(_id, -32602, "content required")
-                payload = {
-                    "content": content,
+                task_payload = {
+                    "content": task_content,
                     "description": arguments.get("description"),
                     "project_id": arguments.get("project_id"),
                     "section_id": arguments.get("section_id"),
@@ -730,8 +734,8 @@ async def handle_rpc(payload: dict):
                     "due_datetime": arguments.get("due_datetime"),
                     "due_timezone": arguments.get("due_timezone"),
                 }
-                payload = {k: v for k, v in payload.items() if v is not None and v != ""}
-                data = await todoist_request("POST", "/tasks", json_body=payload)
+                task_payload = {k: v for k, v in task_payload.items() if v is not None and v != ""}
+                data = await todoist_request("POST", "/tasks", json_body=task_payload)
                 return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]})
 
             if name == "todoist_get_tasks":
@@ -748,7 +752,7 @@ async def handle_rpc(payload: dict):
                 task_id = (arguments.get("task_id") or "").strip()
                 if not task_id:
                     return jsonrpc_error(_id, -32602, "task_id required")
-                payload = {
+                task_payload = {
                     "content": arguments.get("content"),
                     "description": arguments.get("description"),
                     "labels": arguments.get("labels"),
@@ -758,8 +762,8 @@ async def handle_rpc(payload: dict):
                     "due_datetime": arguments.get("due_datetime"),
                     "due_timezone": arguments.get("due_timezone"),
                 }
-                payload = {k: v for k, v in payload.items() if v is not None}
-                data = await todoist_request("POST", f"/tasks/{task_id}", json_body=payload)
+                task_payload = {k: v for k, v in task_payload.items() if v is not None}
+                data = await todoist_request("POST", f"/tasks/{task_id}", json_body=task_payload)
                 return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]})
 
             if name == "todoist_complete_task":
@@ -1125,7 +1129,7 @@ async def run_due_push_schedules() -> dict:
     Returns a dict for debugging (never raises to FastAPI).
     """
     # Always compare in UTC because Supabase `timestamptz` is stored in UTC.
-    now_utc = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    now_utc = datetime.now(timezone.utc).replace(microsecond=0)
     now_iso = now_utc.isoformat().replace("+00:00", "Z")
 
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -1213,9 +1217,15 @@ async def run_due_push_schedules() -> dict:
                 if repeat and repeat != "none":
                     # Keep the same clock time by stepping from the *previous run_at*
                     prev_run_at = job.get("run_at") or now_iso
-                    patch["run_at"] = _next_run_iso(prev_run_at, repeat, now_iso)
-                    patch["status"] = "pending"
-                    patch["enabled"] = True
+                    next_run = _next_run_iso(prev_run_at, repeat, now_iso)
+                    if next_run is not None:
+                        patch["run_at"] = next_run
+                        patch["status"] = "pending"
+                        patch["enabled"] = True
+                    else:
+                        # 解析失败则禁用，防止任务变成 null run_at 僵尸
+                        patch["enabled"] = False
+                        patch["status"] = "error"
                 else:
                     patch["enabled"] = False
                     patch["status"] = "sent"
@@ -1236,8 +1246,13 @@ async def run_due_push_schedules() -> dict:
 
         return {"ok": True, "now": now_iso, "checked": len(jobs), "sent": sent, "touched": touched, "errors": errors}
 @app.get("/cron/tick")
-async def cron_tick(secret: str = ""):
+async def cron_tick(request: Request):
     # 用外部定时器（cron-job.org / UptimeRobot / GitHub Actions）每分钟打这个接口
-    if CRON_SECRET and secret != CRON_SECRET:
-        raise HTTPException(status_code=401, detail="bad secret")
+    # secret 通过 Authorization header 传递，避免出现在 URL 日志中
+    # 调用方式：curl -H "Authorization: Bearer <CRON_SECRET>" https://your-server/cron/tick
+    if CRON_SECRET:
+        auth = request.headers.get("Authorization", "")
+        token = auth.removeprefix("Bearer ").strip()
+        if token != CRON_SECRET:
+            raise HTTPException(status_code=401, detail="bad secret")
     return await run_due_push_schedules()
