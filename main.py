@@ -45,6 +45,7 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL") or "text-embedding-3-small"  # de
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY") or ""
 AMAP_KEY = os.getenv("AMAP_KEY") or ""
 PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN") or ""
+NOTION_TOKEN = (os.getenv("NOTION_TOKEN") or "").strip()
 
 # ---------- MCP tool definitions ----------
 TOOLS = [
@@ -207,6 +208,31 @@ TOOLS = [
     "inputSchema": {
         "type": "object",
         "properties": {}
+    }
+},
+{
+    "name": "notion_create_page",
+    "description": "在 Notion 指定页面下创建一个新子页面（适合写日记、新建笔记）",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "parent_page_id": {"type": "string", "description": "父页面的 Notion page ID（32位字符串，从页面URL中获取）"},
+            "title": {"type": "string", "description": "新页面标题"},
+            "content": {"type": "string", "description": "页面正文内容（纯文本，支持换行）"}
+        },
+        "required": ["parent_page_id", "title"]
+    }
+},
+{
+    "name": "notion_append_content",
+    "description": "在 Notion 已有页面末尾追加文字内容（适合在日记/笔记里续写）",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "page_id": {"type": "string", "description": "目标页面的 Notion page ID"},
+            "content": {"type": "string", "description": "要追加的文字内容（纯文本，支持换行）"}
+        },
+        "required": ["page_id", "content"]
     }
 },
 ]
@@ -729,6 +755,27 @@ async def handle_rpc(payload: dict):
             if name == "run_due_pushplus":
                 out = await run_due_push_schedules()
                 return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(out, ensure_ascii=False)}]})
+
+            # -----------------
+            # Notion tools
+            # -----------------
+            if name == "notion_create_page":
+                parent_page_id = (arguments.get("parent_page_id") or "").strip().replace("-", "")
+                title = (arguments.get("title") or "").strip()
+                content = (arguments.get("content") or "").strip()
+                if not parent_page_id or not title:
+                    return jsonrpc_error(_id, -32602, "parent_page_id and title required")
+                data = await notion_create_page(parent_page_id=parent_page_id, title=title, content=content)
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]})
+
+            if name == "notion_append_content":
+                page_id = (arguments.get("page_id") or "").strip().replace("-", "")
+                content = (arguments.get("content") or "").strip()
+                if not page_id or not content:
+                    return jsonrpc_error(_id, -32602, "page_id and content required")
+                data = await notion_append_content(page_id=page_id, content=content)
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]})
+
             return jsonrpc_error(_id, -32601, f"Unknown tool: {name}")
 
         except Exception as e:
@@ -787,6 +834,63 @@ def debug_sql_snippet():
         ],
     }
 
+
+
+# -----------------------
+# Notion helpers
+# -----------------------
+NOTION_BASE = "https://api.notion.com/v1"
+NOTION_VERSION = "2022-06-28"
+
+def _notion_headers():
+    if not NOTION_TOKEN:
+        raise RuntimeError("NOTION_TOKEN missing")
+    return {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Content-Type": "application/json",
+        "Notion-Version": NOTION_VERSION,
+    }
+
+def _text_to_notion_blocks(text: str) -> list:
+    """把纯文本按换行拆成 paragraph blocks"""
+    blocks = []
+    for line in text.split("\n"):
+        blocks.append({
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {
+                "rich_text": [{"type": "text", "text": {"content": line}}] if line else []
+            }
+        })
+    return blocks
+
+async def notion_create_page(parent_page_id: str, title: str, content: str = "") -> dict:
+    url = f"{NOTION_BASE}/pages"
+    body: dict = {
+        "parent": {"type": "page_id", "page_id": parent_page_id},
+        "properties": {
+            "title": {
+                "title": [{"type": "text", "text": {"content": title}}]
+            }
+        },
+    }
+    if content:
+        body["children"] = _text_to_notion_blocks(content)
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(url, headers=_notion_headers(), json=body)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Notion API {r.status_code}: {r.text}")
+    data = r.json()
+    return {"id": data.get("id"), "url": data.get("url"), "title": title}
+
+async def notion_append_content(page_id: str, content: str) -> dict:
+    url = f"{NOTION_BASE}/blocks/{page_id}/children"
+    body = {"children": _text_to_notion_blocks(content)}
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.patch(url, headers=_notion_headers(), json=body)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Notion API {r.status_code}: {r.text}")
+    return {"ok": True, "appended_blocks": len(body["children"])}
 
 
 # -----------------------
