@@ -46,6 +46,7 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY") or ""
 AMAP_KEY = os.getenv("AMAP_KEY") or ""
 PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN") or ""
 NOTION_TOKEN = (os.getenv("NOTION_TOKEN") or "").strip()
+TAVILY_API_KEY = (os.getenv("TAVILY_API_KEY") or "").strip()
 
 # ---------- MCP tool definitions ----------
 TOOLS = [
@@ -233,6 +234,30 @@ TOOLS = [
             "content": {"type": "string", "description": "要追加的文字内容（纯文本，支持换行）"}
         },
         "required": ["page_id", "content"]
+    }
+},
+{
+    "name": "notion_search",
+    "description": "在 Notion 工作空间中搜索页面（按标题关键词）",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "搜索关键词"},
+            "limit": {"type": "integer", "description": "最多返回几条，默认10", "default": 10}
+        },
+        "required": ["query"]
+    }
+},
+{
+    "name": "web_search",
+    "description": "在互联网上搜索信息（使用 Tavily，适合查新闻、查资料、查事实）",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "搜索关键词或问题"},
+            "max_results": {"type": "integer", "description": "最多返回几条结果，默认5", "default": 5}
+        },
+        "required": ["query"]
     }
 },
 ]
@@ -784,6 +809,22 @@ async def handle_rpc(payload: dict):
                 data = await notion_append_content(page_id=page_id, content=content)
                 return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]})
 
+            if name == "notion_search":
+                query = (arguments.get("query") or "").strip()
+                if not query:
+                    return jsonrpc_error(_id, -32602, "query required")
+                limit = int(arguments.get("limit") or 10)
+                data = await notion_search(query=query, limit=limit)
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]})
+
+            if name == "web_search":
+                query = (arguments.get("query") or "").strip()
+                if not query:
+                    return jsonrpc_error(_id, -32602, "query required")
+                max_results = int(arguments.get("max_results") or 5)
+                data = await tavily_search(query=query, max_results=max_results)
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]})
+
             return jsonrpc_error(_id, -32601, f"Unknown tool: {name}")
 
         except Exception as e:
@@ -899,6 +940,65 @@ async def notion_append_content(page_id: str, content: str) -> dict:
     if r.status_code >= 400:
         raise RuntimeError(f"Notion API {r.status_code}: {r.text}")
     return {"ok": True, "appended_blocks": len(body["children"])}
+
+async def notion_search(query: str, limit: int = 10) -> list:
+    url = f"{NOTION_BASE}/search"
+    body = {
+        "query": query,
+        "filter": {"value": "page", "property": "object"},
+        "page_size": max(1, min(limit, 20)),
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(url, headers=_notion_headers(), json=body)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Notion API {r.status_code}: {r.text}")
+    results = r.json().get("results", [])
+    simplified = []
+    for page in results:
+        title_list = (
+            page.get("properties", {}).get("title", {}).get("title", [])
+            or page.get("properties", {}).get("名称", {}).get("title", [])
+        )
+        title = title_list[0]["plain_text"] if title_list else "(无标题)"
+        simplified.append({
+            "id": page.get("id", "").replace("-", ""),
+            "title": title,
+            "url": page.get("url", ""),
+            "last_edited": page.get("last_edited_time", ""),
+        })
+    return simplified
+
+
+# -----------------------
+# Tavily (web search) helpers
+# -----------------------
+async def tavily_search(query: str, max_results: int = 5) -> dict:
+    if not TAVILY_API_KEY:
+        raise RuntimeError("TAVILY_API_KEY missing")
+    url = "https://api.tavily.com/search"
+    body = {
+        "api_key": TAVILY_API_KEY,
+        "query": query,
+        "max_results": max(1, min(max_results, 10)),
+        "search_depth": "basic",
+        "include_answer": True,
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(url, json=body)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Tavily API {r.status_code}: {r.text}")
+    data = r.json()
+    return {
+        "answer": data.get("answer", ""),
+        "results": [
+            {
+                "title": item.get("title", ""),
+                "url": item.get("url", ""),
+                "content": item.get("content", "")[:500],
+            }
+            for item in data.get("results", [])
+        ],
+    }
 
 
 # -----------------------
