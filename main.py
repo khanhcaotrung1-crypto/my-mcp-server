@@ -6,6 +6,8 @@ import re
 from datetime import datetime, timezone, timedelta
 
 SH_TZ = timezone(timedelta(hours=8))  # Asia/Shanghai fixed offset
+
+import datetime as dt
 from typing import Any, Dict, Optional, List
 
 import httpx
@@ -41,12 +43,17 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or ""
 OPENAI_API_URL = (os.getenv("OPENAI_API_URL") or "https://api.openai.com/v1").rstrip("/")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL") or "text-embedding-3-small"  # default fallback
 
+# ---------- Notion ----------
+NOTION_TOKEN = os.getenv("NOTION_TOKEN") or ""
+NOTION_BASE = (os.getenv("NOTION_BASE") or "https://api.notion.com/v1").rstrip("/")
+# Notion API version header; adjust if needed
+NOTION_VERSION = os.getenv("NOTION_VERSION") or "2022-06-28"
+
+
 # (Optional) you can keep it for future, not used in this version
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY") or ""
 AMAP_KEY = os.getenv("AMAP_KEY") or ""
 PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN") or ""
-NOTION_TOKEN = (os.getenv("NOTION_TOKEN") or "").strip()
-TAVILY_API_KEY = (os.getenv("TAVILY_API_KEY") or "").strip()
 
 # ---------- MCP tool definitions ----------
 TOOLS = [
@@ -211,55 +218,31 @@ TOOLS = [
         "properties": {}
     }
 },
-{
-    "name": "notion_create_page",
-    "description": "在 Notion 指定页面下创建一个新子页面（适合写日记、新建笔记）",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "parent_page_id": {"type": "string", "description": "父页面的 Notion page ID（32位字符串，从页面URL中获取）"},
-            "title": {"type": "string", "description": "新页面标题"},
-            "content": {"type": "string", "description": "页面正文内容（纯文本，支持换行）"}
-        },
-        "required": ["parent_page_id", "title"]
-    }
-},
-{
-    "name": "notion_append_content",
-    "description": "在 Notion 已有页面末尾追加文字内容（适合在日记/笔记里续写）",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "page_id": {"type": "string", "description": "目标页面的 Notion page ID"},
-            "content": {"type": "string", "description": "要追加的文字内容（纯文本，支持换行）"}
-        },
-        "required": ["page_id", "content"]
-    }
-},
+,
 {
     "name": "notion_search",
-    "description": "在 Notion 工作空间中搜索页面（按标题关键词）",
+    "description": "搜索 Notion 中的页面，返回匹配的 page_id/标题/URL（需要配置 NOTION_TOKEN）",
     "inputSchema": {
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "搜索关键词"},
-            "limit": {"type": "integer", "description": "最多返回几条，默认10", "default": 10}
+            "max_results": {"type": "integer", "description": "最多返回多少条，默认 5", "default": 5}
         },
         "required": ["query"]
     }
 },
 {
-    "name": "web_search",
-    "description": "在互联网上搜索信息（使用 Tavily，适合查新闻、查资料、查事实）",
+    "name": "notion_read_page",
+    "description": "读取 Notion 页面的文字内容（需要先用 notion_search 找到 page_id）",
     "inputSchema": {
         "type": "object",
         "properties": {
-            "query": {"type": "string", "description": "搜索关键词或问题"},
-            "max_results": {"type": "integer", "description": "最多返回几条结果，默认5", "default": 5}
+            "page_id": {"type": "string", "description": "页面的 Notion page ID"},
+            "max_blocks": {"type": "integer", "description": "最多读取多少个块，默认 50", "default": 50}
         },
-        "required": ["query"]
+        "required": ["page_id"]
     }
-},
+}
 ]
 
 # ---------- SSE sessions ----------
@@ -284,10 +267,6 @@ async def mcp_entry(request: Request):
     # 1) 如果它就是 JSON-RPC（含 method 字段），直接同步返回 JSON-RPC 响应
     if isinstance(payload, dict) and payload.get("method"):
         resp = await handle_rpc(payload)
-        # 通知消息无需响应，返回空 204
-        if resp is None:
-            from fastapi.responses import Response
-            return Response(status_code=204)
         return JSONResponse(resp, status_code=200)
 
     # 2) 否则当作“握手”请求：创建 session，返回 endpoint 信息（非流式）
@@ -335,7 +314,7 @@ async def sse_stream(session_id: str):
             yield sse_data({"type": "ping", "t": datetime.now().isoformat()})
 
 
-# mcp_sse 是内部 helper，由 mcp_entry 的 GET 分支调用，不单独注册路由
+@app.get("/mcp")
 async def mcp_sse():
     session_id = uuid.uuid4().hex
     SESSIONS[session_id] = asyncio.Queue()
@@ -403,10 +382,6 @@ async def _handle_message(session_id: str, request: Request):
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
     resp = await handle_rpc(payload)
-
-    # 通知消息不需要回复，直接返回 200
-    if resp is None:
-        return JSONResponse({"ok": True}, status_code=200)
 
     # Transport style: push response through SSE, HTTP returns quickly
     await SESSIONS[session_id].put(resp)
@@ -516,12 +491,10 @@ async def supabase_recent_memories(limit: int = 10):
 async def supabase_keyword_search(query: str, k: int = 5):
     # basic fallback if vector RPC not available
     url = f"{SUPABASE_URL}/rest/v1/memories"
-    # 转义 PostgREST 特殊字符，防止过滤表达式被破坏
-    safe_query = query.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)").replace(",", "\\,").replace("*", "\\*")
     # title/content ILIKE
     params = {
         "select": "id,title,content,category,importance,created_at",
-        "or": f"(title.ilike.*{safe_query}*,content.ilike.*{safe_query}*)",
+        "or": f"(title.ilike.*{query}*,content.ilike.*{query}*)",
         "order": "created_at.desc",
         "limit": str(max(1, min(k, 20))),
     }
@@ -613,10 +586,6 @@ async def handle_rpc(payload: dict):
     if method in ("tools/list", "list_tools"):
         return jsonrpc_result(_id, {"tools": TOOLS})
 
-    # MCP 协议：通知消息（notifications/*）id 为 null，按规范不能返回任何响应
-    if method is None or (isinstance(method, str) and method.startswith("notifications/")):
-        return None
-
     if method in ("tools/call", "call_tool"):
         name = params.get("name")
         arguments = params.get("arguments") or {}
@@ -681,7 +650,6 @@ async def handle_rpc(payload: dict):
 
 
             
-
             # -----------------
             # AMap tools
             # -----------------
@@ -744,8 +712,8 @@ async def handle_rpc(payload: dict):
                     if olng is not None and olat is not None:
                         origin = f"{olng},{olat}"
                 if not destination:
-                    dlng = arguments.get("dest_lng")
-                    dlat = arguments.get("dest_lat")
+                    dlng = arguments.get("destination_lng")
+                    dlat = arguments.get("destination_lat")
                     if dlng is not None and dlat is not None:
                         destination = f"{dlng},{dlat}"
                 if not origin or not destination:
@@ -788,44 +756,25 @@ async def handle_rpc(payload: dict):
             if name == "run_due_pushplus":
                 out = await run_due_push_schedules()
                 return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(out, ensure_ascii=False)}]})
-
-            # -----------------
-            # Notion tools
-            # -----------------
-            if name == "notion_create_page":
-                parent_page_id = (arguments.get("parent_page_id") or "").strip().replace("-", "")
-                title = (arguments.get("title") or "").strip()
-                content = (arguments.get("content") or "").strip()
-                if not parent_page_id or not title:
-                    return jsonrpc_error(_id, -32602, "parent_page_id and title required")
-                data = await notion_create_page(parent_page_id=parent_page_id, title=title, content=content)
-                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]})
-
-            if name == "notion_append_content":
-                page_id = (arguments.get("page_id") or "").strip().replace("-", "")
-                content = (arguments.get("content") or "").strip()
-                if not page_id or not content:
-                    return jsonrpc_error(_id, -32602, "page_id and content required")
-                data = await notion_append_content(page_id=page_id, content=content)
-                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]})
-
+            
             if name == "notion_search":
-                query = (arguments.get("query") or "").strip()
-                if not query:
-                    return jsonrpc_error(_id, -32602, "query required")
-                limit = int(arguments.get("limit") or 10)
-                data = await notion_search(query=query, limit=limit)
-                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]})
-
-            if name == "web_search":
-                query = (arguments.get("query") or "").strip()
-                if not query:
+                q = (arguments.get("query") or "").strip()
+                if not q:
                     return jsonrpc_error(_id, -32602, "query required")
                 max_results = int(arguments.get("max_results") or 5)
-                data = await tavily_search(query=query, max_results=max_results)
+                data = await notion_search(query=q, max_results=max_results)
                 return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]})
 
-            return jsonrpc_error(_id, -32601, f"Unknown tool: {name}")
+            if name == "notion_read_page":
+                page_id = (arguments.get("page_id") or "").strip().replace("-", "")
+                if not page_id:
+                    return jsonrpc_error(_id, -32602, "page_id required")
+                max_blocks = int(arguments.get("max_blocks") or 50)
+                data = await notion_read_page(page_id=page_id, max_blocks=max_blocks)
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]})
+
+
+return jsonrpc_error(_id, -32601, f"Unknown tool: {name}")
 
         except Exception as e:
             import traceback as _tb
@@ -883,122 +832,6 @@ def debug_sql_snippet():
         ],
     }
 
-
-
-# -----------------------
-# Notion helpers
-# -----------------------
-NOTION_BASE = "https://api.notion.com/v1"
-NOTION_VERSION = "2022-06-28"
-
-def _notion_headers():
-    if not NOTION_TOKEN:
-        raise RuntimeError("NOTION_TOKEN missing")
-    return {
-        "Authorization": f"Bearer {NOTION_TOKEN}",
-        "Content-Type": "application/json",
-        "Notion-Version": NOTION_VERSION,
-    }
-
-def _text_to_notion_blocks(text: str) -> list:
-    """把纯文本按换行拆成 paragraph blocks"""
-    blocks = []
-    for line in text.split("\n"):
-        blocks.append({
-            "object": "block",
-            "type": "paragraph",
-            "paragraph": {
-                "rich_text": [{"type": "text", "text": {"content": line}}] if line else []
-            }
-        })
-    return blocks
-
-async def notion_create_page(parent_page_id: str, title: str, content: str = "") -> dict:
-    url = f"{NOTION_BASE}/pages"
-    body: dict = {
-        "parent": {"type": "page_id", "page_id": parent_page_id},
-        "properties": {
-            "title": {
-                "title": [{"type": "text", "text": {"content": title}}]
-            }
-        },
-    }
-    if content:
-        body["children"] = _text_to_notion_blocks(content)
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(url, headers=_notion_headers(), json=body)
-    if r.status_code >= 400:
-        raise RuntimeError(f"Notion API {r.status_code}: {r.text}")
-    data = r.json()
-    return {"id": data.get("id"), "url": data.get("url"), "title": title}
-
-async def notion_append_content(page_id: str, content: str) -> dict:
-    url = f"{NOTION_BASE}/blocks/{page_id}/children"
-    body = {"children": _text_to_notion_blocks(content)}
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.patch(url, headers=_notion_headers(), json=body)
-    if r.status_code >= 400:
-        raise RuntimeError(f"Notion API {r.status_code}: {r.text}")
-    return {"ok": True, "appended_blocks": len(body["children"])}
-
-async def notion_search(query: str, limit: int = 10) -> list:
-    url = f"{NOTION_BASE}/search"
-    body = {
-        "query": query,
-        "filter": {"value": "page", "property": "object"},
-        "page_size": max(1, min(limit, 20)),
-    }
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(url, headers=_notion_headers(), json=body)
-    if r.status_code >= 400:
-        raise RuntimeError(f"Notion API {r.status_code}: {r.text}")
-    results = r.json().get("results", [])
-    simplified = []
-    for page in results:
-        title_list = (
-            page.get("properties", {}).get("title", {}).get("title", [])
-            or page.get("properties", {}).get("名称", {}).get("title", [])
-        )
-        title = title_list[0]["plain_text"] if title_list else "(无标题)"
-        simplified.append({
-            "id": page.get("id", "").replace("-", ""),
-            "title": title,
-            "url": page.get("url", ""),
-            "last_edited": page.get("last_edited_time", ""),
-        })
-    return simplified
-
-
-# -----------------------
-# Tavily (web search) helpers
-# -----------------------
-async def tavily_search(query: str, max_results: int = 5) -> dict:
-    if not TAVILY_API_KEY:
-        raise RuntimeError("TAVILY_API_KEY missing")
-    url = "https://api.tavily.com/search"
-    body = {
-        "api_key": TAVILY_API_KEY,
-        "query": query,
-        "max_results": max(1, min(max_results, 10)),
-        "search_depth": "basic",
-        "include_answer": True,
-    }
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(url, json=body)
-    if r.status_code >= 400:
-        raise RuntimeError(f"Tavily API {r.status_code}: {r.text}")
-    data = r.json()
-    return {
-        "answer": data.get("answer", ""),
-        "results": [
-            {
-                "title": item.get("title", ""),
-                "url": item.get("url", ""),
-                "content": item.get("content", "")[:500],
-            }
-            for item in data.get("results", [])
-        ],
-    }
 
 
 # -----------------------
@@ -1097,7 +930,7 @@ def _parse_run_at(run_at: str) -> str:
     # naive -> assume +08:00
     return s + "+08:00"
 
-def _next_run_iso(prev_run_iso: str, repeat: str, now_iso_utc: str) -> Optional[str]:
+def _next_run_iso(prev_run_iso: str, repeat: str, now_iso_utc: str) -> str | None:
     """Return the *next* run_at strictly after `now_iso_utc` (UTC), keeping the original local time-of-day.
 
     Why: if a daily job is months behind, doing +1 day will spam (catch-up loop). We instead jump to the next occurrence.
@@ -1184,7 +1017,7 @@ async def run_due_push_schedules() -> dict:
     Returns a dict for debugging (never raises to FastAPI).
     """
     # Always compare in UTC because Supabase `timestamptz` is stored in UTC.
-    now_utc = datetime.now(timezone.utc).replace(microsecond=0)
+    now_utc = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     now_iso = now_utc.isoformat().replace("+00:00", "Z")
 
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -1272,15 +1105,9 @@ async def run_due_push_schedules() -> dict:
                 if repeat and repeat != "none":
                     # Keep the same clock time by stepping from the *previous run_at*
                     prev_run_at = job.get("run_at") or now_iso
-                    next_run = _next_run_iso(prev_run_at, repeat, now_iso)
-                    if next_run is not None:
-                        patch["run_at"] = next_run
-                        patch["status"] = "pending"
-                        patch["enabled"] = True
-                    else:
-                        # 解析失败则禁用，防止任务变成 null run_at 僵尸
-                        patch["enabled"] = False
-                        patch["status"] = "error"
+                    patch["run_at"] = _next_run_iso(prev_run_at, repeat, now_iso)
+                    patch["status"] = "pending"
+                    patch["enabled"] = True
                 else:
                     patch["enabled"] = False
                     patch["status"] = "sent"
@@ -1301,13 +1128,82 @@ async def run_due_push_schedules() -> dict:
 
         return {"ok": True, "now": now_iso, "checked": len(jobs), "sent": sent, "touched": touched, "errors": errors}
 @app.get("/cron/tick")
-async def cron_tick(request: Request):
+def _notion_headers() -> dict:
+    if not NOTION_TOKEN:
+        raise RuntimeError("NOTION_TOKEN is not configured")
+    return {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Notion-Version": NOTION_VERSION,
+        "Content-Type": "application/json",
+    }
+
+
+async def notion_search(query: str, max_results: int = 5) -> dict:
+    # POST /search
+    url = f"{NOTION_BASE}/search"
+    payload = {
+        "query": query,
+        "page_size": max(1, min(int(max_results or 5), 20)),
+        "sort": {"direction": "descending", "timestamp": "last_edited_time"},
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(url, headers=_notion_headers(), json=payload)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Notion API {r.status_code}: {r.text}")
+    data = r.json()
+    items = []
+    for it in data.get("results", []):
+        obj = it.get("object")
+        if obj != "page":
+            continue
+        pid = (it.get("id") or "").replace("-", "")
+        # title extraction
+        title = ""
+        try:
+            props = it.get("properties", {})
+            # Prefer 'title' type property (often named 'title' or 'Name')
+            for p in props.values():
+                if p.get("type") == "title":
+                    title = "".join(t.get("plain_text", "") for t in p.get("title", []))
+                    break
+        except Exception:
+            pass
+        if not title:
+            # fallback: page title in a few shapes
+            title = it.get("url", "")
+        items.append(
+            {
+                "page_id": pid,
+                "title": title,
+                "url": it.get("url"),
+                "last_edited_time": it.get("last_edited_time"),
+            }
+        )
+        if len(items) >= int(max_results or 5):
+            break
+    return {"query": query, "count": len(items), "results": items}
+
+
+async def notion_read_page(page_id: str, max_blocks: int = 50) -> dict:
+    url = f"{NOTION_BASE}/blocks/{page_id}/children"
+    params = {"page_size": max(1, min(int(max_blocks or 50), 100))}
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(url, headers=_notion_headers(), params=params)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Notion API {r.status_code}: {r.text}")
+    blocks = r.json().get("results", [])
+    # 提取各块的纯文本
+    lines = []
+    for block in blocks:
+        btype = block.get("type", "")
+        rich = (block.get(btype) or {}).get("rich_text", [])
+        text = "".join(t.get("plain_text", "") for t in rich)
+        if text:
+            lines.append(text)
+    return {"page_id": page_id, "block_count": len(blocks), "text": "\n".join(lines)}
+
+async def cron_tick(secret: str = ""):
     # 用外部定时器（cron-job.org / UptimeRobot / GitHub Actions）每分钟打这个接口
-    # secret 通过 Authorization header 传递，避免出现在 URL 日志中
-    # 调用方式：curl -H "Authorization: Bearer <CRON_SECRET>" https://your-server/cron/tick
-    if CRON_SECRET:
-        auth = request.headers.get("Authorization", "")
-        token = auth.removeprefix("Bearer ").strip()
-        if token != CRON_SECRET:
-            raise HTTPException(status_code=401, detail="bad secret")
+    if CRON_SECRET and secret != CRON_SECRET:
+        raise HTTPException(status_code=401, detail="bad secret")
     return await run_due_push_schedules()
