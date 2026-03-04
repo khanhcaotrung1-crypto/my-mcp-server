@@ -983,6 +983,29 @@ async def notion_search(query: str, limit: int = 10) -> list:
         "filter": {"value": "page", "property": "object"},
         "page_size": max(1, min(limit, 20)),
     }
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(url, headers=_notion_headers(), json=body)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Notion API {r.status_code}: {r.text}")
+    results = r.json().get("results", [])
+    simplified = []
+    for page in results:
+        props = page.get("properties", {})
+        title_field = None
+        for field in props.values():
+            if field.get("type") == "title":
+                title_field = field
+                break
+        title_list = title_field.get("title", []) if title_field else []
+        title = title_list[0]["plain_text"] if title_list else "(无标题)"
+        simplified.append({
+            "id": page.get("id", "").replace("-", ""),
+            "title": title,
+            "url": page.get("url", ""),
+            "last_edited": page.get("last_edited_time", ""),
+        })
+    return simplified
+    }
 
 async def notion_read_page(page_id: str, max_chars: int = 3000) -> dict:
     url = f"{NOTION_BASE}/blocks/{page_id}/children"
