@@ -329,8 +329,15 @@ def health():
 @app.get("/debug/notion_search")
 async def debug_notion_search(q: str = "姐姐"):
     try:
-        result = await notion_search(query=q, limit=5)
-        return {"ok": True, "result": result}
+        url = f"{NOTION_BASE}/search"
+        body = {
+            "query": q,
+            "filter": {"value": "page", "property": "object"},
+            "page_size": 5,
+        }
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(url, headers=_notion_headers(), json=body)
+        return {"status": r.status_code, "raw": r.json()}
     except Exception as e:
         import traceback
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()}
