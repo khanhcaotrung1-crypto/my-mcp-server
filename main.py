@@ -326,6 +326,14 @@ def health():
         "embedding_model": EMBEDDING_MODEL,
     }
 
+@app.get("/debug/notion_search")
+async def debug_notion_search(q: str = "姐姐"):
+    try:
+        result = await notion_search(query=q, limit=5)
+        return {"ok": True, "result": result}
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()}
 
 # ---------- SSE helpers ----------
 def sse_data(data: Any) -> str:
