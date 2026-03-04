@@ -1005,7 +1005,7 @@ async def notion_search(query: str, limit: int = 10) -> list:
             "last_edited": page.get("last_edited_time", ""),
         })
     return simplified
-    }
+    
 
 async def notion_read_page(page_id: str, max_chars: int = 3000) -> dict:
     url = f"{NOTION_BASE}/blocks/{page_id}/children"
