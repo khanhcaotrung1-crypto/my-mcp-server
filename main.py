@@ -770,13 +770,17 @@ async def handle_rpc(payload: dict):
                 if not query:
                     return jsonrpc_error(_id, -32602, "query required")
 
+                print(f"[search_memory] query={query!r} k={k}", flush=True)
+
                 # Try semantic search via RPC
                 try:
                     q_emb = await embed_text(query)
                     rows = await supabase_vector_search(q_emb, k=k)
-                except Exception:
-                    # fallback keyword search
+                    print(f"[search_memory] vector search returned {len(rows)} rows: {[r.get('title') for r in rows]}", flush=True)
+                except Exception as se:
+                    print(f"[search_memory] vector search failed: {se}, falling back to keyword", flush=True)
                     rows = await supabase_keyword_search(query, k=k)
+                    print(f"[search_memory] keyword search returned {len(rows)} rows: {[r.get('title') for r in rows]}", flush=True)
 
                 # 异步更新被召回记忆的权重（fire and forget）
                 async def _boost_recalled(recalled_rows):
