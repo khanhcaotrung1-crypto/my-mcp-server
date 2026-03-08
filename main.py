@@ -272,6 +272,56 @@ TOOLS = [
         "required": ["query"]
     }
 },
+{
+    "name": "add_note",
+    "description": "添加一条便签或待办事项",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "content": {"type": "string", "description": "便签内容"}
+        },
+        "required": ["content"]
+    }
+},
+{
+    "name": "list_notes",
+    "description": "查看当前未完成的便签/待办列表",
+    "inputSchema": {
+        "type": "object",
+        "properties": {}
+    }
+},
+{
+    "name": "done_note",
+    "description": "把一条便签标记为已完成",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "note_id": {"type": "string", "description": "便签的 UUID"}
+        },
+        "required": ["note_id"]
+    }
+},
+{
+    "name": "update_core_block",
+    "description": "更新 Core Blocks 核心档案（AI 自动分析对话后调用，更新某个核心信息块）",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "block_key": {"type": "string", "description": "要更新的块名，如 relationship / user_profile / rituals"},
+            "content": {"type": "string", "description": "新的内容"}
+        },
+        "required": ["block_key", "content"]
+    }
+},
+{
+    "name": "get_core_blocks",
+    "description": "读取当前所有 Core Blocks 核心档案内容",
+    "inputSchema": {
+        "type": "object",
+        "properties": {}
+    }
+},
 ]
 
 # ---------- SSE sessions ----------
@@ -859,6 +909,64 @@ async def handle_rpc(payload: dict):
                 max_results = int(arguments.get("max_results") or 5)
                 data = await tavily_search(query=query, max_results=max_results)
                 return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]})
+
+            if name == "add_note":
+                content = (arguments.get("content") or "").strip()
+                if not content:
+                    return jsonrpc_error(_id, -32602, "content required")
+                url = f"{SUPABASE_URL}/rest/v1/notes"
+                async with httpx.AsyncClient(timeout=10) as client:
+                    r = await client.post(url, headers=_supabase_headers(), json={"content": content})
+                if r.status_code >= 400:
+                    raise RuntimeError(f"Supabase {r.status_code}: {r.text}")
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": f"便签已添加：{content}"}]})
+
+            if name == "list_notes":
+                url = f"{SUPABASE_URL}/rest/v1/notes"
+                params = {"select": "id,content,created_at", "done": "eq.false", "order": "created_at.desc", "limit": "20"}
+                async with httpx.AsyncClient(timeout=10) as client:
+                    r = await client.get(url, headers=_supabase_headers(), params=params)
+                if r.status_code >= 400:
+                    raise RuntimeError(f"Supabase {r.status_code}: {r.text}")
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(r.json(), ensure_ascii=False)}]})
+
+            if name == "done_note":
+                note_id = (arguments.get("note_id") or "").strip()
+                if not note_id:
+                    return jsonrpc_error(_id, -32602, "note_id required")
+                url = f"{SUPABASE_URL}/rest/v1/notes?id=eq.{note_id}"
+                async with httpx.AsyncClient(timeout=10) as client:
+                    r = await client.patch(url, headers=_supabase_headers(), json={"done": True, "done_at": datetime.now(timezone.utc).isoformat()})
+                if r.status_code >= 400:
+                    raise RuntimeError(f"Supabase {r.status_code}: {r.text}")
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": "便签已完成 ✓"}]})
+
+            if name == "update_core_block":
+                block_key = (arguments.get("block_key") or "").strip()
+                content = (arguments.get("content") or "").strip()
+                if not block_key or not content:
+                    return jsonrpc_error(_id, -32602, "block_key and content required")
+                url = f"{SUPABASE_URL}/rest/v1/core_blocks?block_key=eq.{block_key}"
+                patch_headers = {**_supabase_headers(), "Prefer": "return=representation"}
+                async with httpx.AsyncClient(timeout=10) as client:
+                    r = await client.patch(url, headers=patch_headers, json={"content": content, "updated_at": datetime.now(timezone.utc).isoformat()})
+                if r.status_code >= 400:
+                    raise RuntimeError(f"Supabase {r.status_code}: {r.text}")
+                if r.json() == []:
+                    async with httpx.AsyncClient(timeout=10) as client:
+                        r2 = await client.post(f"{SUPABASE_URL}/rest/v1/core_blocks", headers=_supabase_headers(), json={"block_key": block_key, "content": content})
+                    if r2.status_code >= 400:
+                        raise RuntimeError(f"Supabase insert {r2.status_code}: {r2.text}")
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": f"Core Block [{block_key}] 已更新"}]})
+
+            if name == "get_core_blocks":
+                url = f"{SUPABASE_URL}/rest/v1/core_blocks"
+                params = {"select": "block_key,content,updated_at", "order": "priority.asc"}
+                async with httpx.AsyncClient(timeout=10) as client:
+                    r = await client.get(url, headers=_supabase_headers(), params=params)
+                if r.status_code >= 400:
+                    raise RuntimeError(f"Supabase {r.status_code}: {r.text}")
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(r.json(), ensure_ascii=False)}]})
 
             return jsonrpc_error(_id, -32601, f"Unknown tool: {name}")
 
