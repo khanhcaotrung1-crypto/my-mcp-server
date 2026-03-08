@@ -84,6 +84,17 @@ TOOLS = [
             "properties": {"limit": {"type": "integer", "default": 10}},
         },
     },
+{
+    "name": "forget_memory",
+    "description": "手动把一条记忆标记为「淡忘」，之后不会再被召回",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "memory_id": {"type": "string", "description": "记忆的 UUID"}
+        },
+        "required": ["memory_id"]
+    }
+},
 
 {
     "name": "amap_geocode",
@@ -554,9 +565,14 @@ async def supabase_insert_memory(
     embedding_vec: Optional[List[float]] = None,
 ):
     url = f"{SUPABASE_URL}/rest/v1/memories"
+    imp = importance if importance is not None else 3
+    initial_weight = {5: 1.0, 4: 0.8, 3: 0.6, 2: 0.4, 1: 0.3}.get(int(imp), 0.6)
     payload: Dict[str, Any] = {
         "title": title,
         "content": content,
+        "weight": initial_weight,
+        "recall_count": 0,
+        "forgotten": False,
     }
     if category is not None:
         payload["category"] = category
@@ -737,6 +753,17 @@ async def handle_rpc(payload: dict):
                     {"content": [{"type": "text", "text": json.dumps(rows, ensure_ascii=False)}]},
                 )
 
+            if name == "forget_memory":
+                memory_id = (arguments.get("memory_id") or "").strip()
+                if not memory_id:
+                    return jsonrpc_error(_id, -32602, "memory_id required")
+                url = f"{SUPABASE_URL}/rest/v1/memories?id=eq.{memory_id}"
+                async with httpx.AsyncClient(timeout=10) as client:
+                    r = await client.patch(url, headers=_supabase_headers(), json={"forgotten": True, "weight": 0.0})
+                if r.status_code >= 400:
+                    raise RuntimeError(f"Supabase {r.status_code}: {r.text}")
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": "记忆已淡忘 ✓"}]})
+
             if name == "search_memory":
                 query = (arguments.get("query") or "").strip()
                 k = int(arguments.get("k") or 5)
@@ -750,6 +777,28 @@ async def handle_rpc(payload: dict):
                 except Exception:
                     # fallback keyword search
                     rows = await supabase_keyword_search(query, k=k)
+
+                # 异步更新被召回记忆的权重（fire and forget）
+                async def _boost_recalled(recalled_rows):
+                    try:
+                        now_iso = datetime.now(timezone.utc).isoformat()
+                        for row in recalled_rows:
+                            rid = row.get("id")
+                            if not rid:
+                                continue
+                            cur_weight = float(row.get("weight") or 0.6)
+                            cur_count = int(row.get("recall_count") or 0)
+                            new_weight = min(1.0, cur_weight + 0.05)
+                            patch_url = f"{SUPABASE_URL}/rest/v1/memories?id=eq.{rid}"
+                            async with httpx.AsyncClient(timeout=5) as _c:
+                                await _c.patch(patch_url, headers=_supabase_headers(), json={
+                                    "weight": new_weight,
+                                    "recall_count": cur_count + 1,
+                                    "last_recalled_at": now_iso,
+                                })
+                    except Exception:
+                        pass
+                asyncio.create_task(_boost_recalled(rows))
 
                 return jsonrpc_result(
                     _id,
@@ -1497,6 +1546,48 @@ async def run_due_push_schedules() -> dict:
                 errors.append({"id": job_id, "stage": "update_schedule", "error": f"{type(e).__name__}: {e}"})
 
         return {"ok": True, "now": now_iso, "checked": len(jobs), "sent": sent, "touched": touched, "errors": errors}
+
+
+async def decay_memory_weights() -> dict:
+    """每天衰减一次记忆权重，低于 0.05 的标记为淡忘"""
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        return {"skipped": True, "reason": "supabase not configured"}
+
+    DECAY_RATE = 0.02        # 每天降低 0.02
+    FORGET_THRESHOLD = 0.05  # 低于此值标记为淡忘
+
+    url = f"{SUPABASE_URL}/rest/v1/memories"
+    params = {
+        "select": "id,weight",
+        "forgotten": "eq.false",
+        "weight": "gt.0",
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(url, headers=_supabase_headers(), params=params)
+    if r.status_code >= 400:
+        return {"error": f"fetch failed {r.status_code}"}
+
+    rows = r.json()
+    decayed = 0
+    forgotten = 0
+
+    for row in rows:
+        rid = row.get("id")
+        cur_weight = float(row.get("weight") or 0.6)
+        new_weight = round(max(0.0, cur_weight - DECAY_RATE), 4)
+        patch = {"weight": new_weight}
+        if new_weight < FORGET_THRESHOLD:
+            patch["forgotten"] = True
+            forgotten += 1
+        else:
+            decayed += 1
+        patch_url = f"{SUPABASE_URL}/rest/v1/memories?id=eq.{rid}"
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.patch(patch_url, headers=_supabase_headers(), json=patch)
+
+    return {"decayed": decayed, "forgotten": forgotten, "total": len(rows)}
+
+
 @app.get("/cron/tick")
 async def cron_tick(request: Request):
     # 用外部定时器（cron-job.org / UptimeRobot / GitHub Actions）每分钟打这个接口
@@ -1507,4 +1598,13 @@ async def cron_tick(request: Request):
         token = auth.removeprefix("Bearer ").strip()
         if token != CRON_SECRET:
             raise HTTPException(status_code=401, detail="bad secret")
-    return await run_due_push_schedules()
+
+    push_result = await run_due_push_schedules()
+
+    # 每天只跑一次权重衰减（整点 00 分触发）
+    now_sh = datetime.now(SH_TZ)
+    decay_result = {}
+    if now_sh.hour == 3 and now_sh.minute == 0:
+        decay_result = await decay_memory_weights()
+
+    return {**push_result, "decay": decay_result}
