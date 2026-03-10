@@ -333,6 +333,86 @@ TOOLS = [
         "properties": {}
     }
 },
+{
+    "name": "append_diary",
+    "description": "写一篇日记到数据库，记录当天发生的事、感受或想法。每次对话结束时如有值得记录的内容可主动调用。",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "content": {"type": "string", "description": "日记正文内容"},
+            "date": {"type": "string", "description": "日期，格式 YYYY-MM-DD，留空则用今天"}
+        },
+        "required": ["content"]
+    }
+},
+{
+    "name": "list_diary",
+    "description": "查询历史日记，可按日期范围筛选",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "limit": {"type": "integer", "description": "返回条数，默认10"},
+            "date_from": {"type": "string", "description": "开始日期 YYYY-MM-DD"},
+            "date_to": {"type": "string", "description": "结束日期 YYYY-MM-DD"}
+        }
+    }
+},
+{
+    "name": "log_mood",
+    "description": "记录当下情绪状态。当用户表达明显情绪时可主动调用。",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "mood": {"type": "string", "description": "情绪标签，如 happy/sad/anxious/calm/excited/tired 等"},
+            "intensity": {"type": "integer", "description": "强度 1-5，5最强"},
+            "note": {"type": "string", "description": "补充说明，可留空"}
+        },
+        "required": ["mood", "intensity"]
+    }
+},
+{
+    "name": "get_mood_history",
+    "description": "查询情绪记录历史",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "limit": {"type": "integer", "description": "返回条数，默认20"},
+            "mood": {"type": "string", "description": "按情绪标签筛选，留空返回全部"}
+        }
+    }
+},
+{
+    "name": "search_note",
+    "description": "按关键词搜索 notes 待办/备忘内容",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "搜索关键词"},
+            "include_done": {"type": "boolean", "description": "是否包含已完成的，默认 false"}
+        },
+        "required": ["query"]
+    }
+},
+{
+    "name": "get_memory_stats",
+    "description": "查看记忆库统计：总数、权重分布、各分类数量、濒临遗忘的记忆",
+    "inputSchema": {
+        "type": "object",
+        "properties": {}
+    }
+},
+{
+    "name": "get_weather",
+    "description": "直接用城市名查询天气，封装了地理编码步骤",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "city": {"type": "string", "description": "城市名，如 北京、上海、成都"},
+            "forecast": {"type": "boolean", "description": "true 返回未来几天预报，false 返回实时天气，默认 false"}
+        },
+        "required": ["city"]
+    }
+}
 ]
 
 # ---------- SSE sessions ----------
@@ -770,17 +850,12 @@ async def handle_rpc(payload: dict):
                 if not query:
                     return jsonrpc_error(_id, -32602, "query required")
 
-                print(f"[search_memory] query={query!r} k={k}", flush=True)
-
                 # Try semantic search via RPC
                 try:
                     q_emb = await embed_text(query)
                     rows = await supabase_vector_search(q_emb, k=k)
-                    print(f"[search_memory] vector search returned {len(rows)} rows: {[r.get('title') for r in rows]}", flush=True)
-                except Exception as se:
-                    print(f"[search_memory] vector search failed: {se}, falling back to keyword", flush=True)
+                except Exception:
                     rows = await supabase_keyword_search(query, k=k)
-                    print(f"[search_memory] keyword search returned {len(rows)} rows: {[r.get('title') for r in rows]}", flush=True)
 
                 # 异步更新被召回记忆的权重（fire and forget）
                 async def _boost_recalled(recalled_rows):
@@ -1020,6 +1095,54 @@ async def handle_rpc(payload: dict):
                 if r.status_code >= 400:
                     raise RuntimeError(f"Supabase {r.status_code}: {r.text}")
                 return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(r.json(), ensure_ascii=False)}]})
+
+            if name == "append_diary":
+                result = await tool_append_diary(
+                    content=arguments.get("content", ""),
+                    date=arguments.get("date")
+                )
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": result}]})
+
+            if name == "list_diary":
+                result = await tool_list_diary(
+                    limit=arguments.get("limit", 10),
+                    date_from=arguments.get("date_from"),
+                    date_to=arguments.get("date_to")
+                )
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]})
+
+            if name == "log_mood":
+                result = await tool_log_mood(
+                    mood=arguments.get("mood", ""),
+                    intensity=arguments.get("intensity", 3),
+                    note=arguments.get("note")
+                )
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": result}]})
+
+            if name == "get_mood_history":
+                result = await tool_get_mood_history(
+                    limit=arguments.get("limit", 20),
+                    mood=arguments.get("mood")
+                )
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]})
+
+            if name == "search_note":
+                result = await tool_search_note(
+                    query=arguments.get("query", ""),
+                    include_done=arguments.get("include_done", False)
+                )
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]})
+
+            if name == "get_memory_stats":
+                result = await tool_get_memory_stats()
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]})
+
+            if name == "get_weather":
+                result = await tool_get_weather(
+                    city=arguments.get("city", ""),
+                    forecast=arguments.get("forecast", False)
+                )
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]})
 
             return jsonrpc_error(_id, -32601, f"Unknown tool: {name}")
 
@@ -1612,3 +1735,144 @@ async def cron_tick(request: Request):
         decay_result = await decay_memory_weights()
 
     return {**push_result, "decay": decay_result}
+
+
+# ============================================================
+# 新增工具实现
+# ============================================================
+
+async def tool_append_diary(content: str, date: Optional[str] = None) -> str:
+    """写日记"""
+    from datetime import date as date_type
+    if not content.strip():
+        return "内容不能为空"
+    entry_date = date or date_type.today().isoformat()
+    url = f"{SUPABASE_URL}/rest/v1/diary"
+    payload = {"content": content.strip(), "date": entry_date}
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.post(url, headers={**_supabase_headers(), "Prefer": "return=representation"}, json=payload)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Supabase {r.status_code}: {r.text}")
+    return f"日记已保存，日期：{entry_date}"
+
+
+async def tool_list_diary(limit: int = 10, date_from: Optional[str] = None, date_to: Optional[str] = None) -> list:
+    """查询日记"""
+    url = f"{SUPABASE_URL}/rest/v1/diary"
+    params: dict = {"select": "id,date,content,created_at", "order": "date.desc", "limit": str(limit)}
+    if date_from:
+        params["date"] = f"gte.{date_from}"
+    if date_to:
+        params["date"] = f"lte.{date_to}"
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get(url, headers=_supabase_headers(), params=params)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Supabase {r.status_code}: {r.text}")
+    return r.json()
+
+
+async def tool_log_mood(mood: str, intensity: int, note: Optional[str] = None) -> str:
+    """记录情绪"""
+    if not mood.strip():
+        return "mood 不能为空"
+    intensity = max(1, min(5, int(intensity)))
+    url = f"{SUPABASE_URL}/rest/v1/mood_logs"
+    payload = {"mood": mood.strip(), "intensity": intensity, "note": note or ""}
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.post(url, headers={**_supabase_headers(), "Prefer": "return=representation"}, json=payload)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Supabase {r.status_code}: {r.text}")
+    return f"情绪已记录：{mood}（强度 {intensity}/5）"
+
+
+async def tool_get_mood_history(limit: int = 20, mood: Optional[str] = None) -> list:
+    """查询情绪历史"""
+    url = f"{SUPABASE_URL}/rest/v1/mood_logs"
+    params: dict = {"select": "id,mood,intensity,note,created_at", "order": "created_at.desc", "limit": str(limit)}
+    if mood:
+        params["mood"] = f"eq.{mood}"
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get(url, headers=_supabase_headers(), params=params)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Supabase {r.status_code}: {r.text}")
+    return r.json()
+
+
+async def tool_search_note(query: str, include_done: bool = False) -> list:
+    """按关键词搜索 notes"""
+    url = f"{SUPABASE_URL}/rest/v1/notes"
+    params: dict = {
+        "select": "id,content,done,created_at",
+        "content": f"ilike.*{query}*",
+        "order": "created_at.desc",
+        "limit": "30"
+    }
+    if not include_done:
+        params["done"] = "eq.false"
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get(url, headers=_supabase_headers(), params=params)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Supabase {r.status_code}: {r.text}")
+    return r.json()
+
+
+async def tool_get_memory_stats() -> dict:
+    """记忆库统计"""
+    headers = _supabase_headers()
+    async with httpx.AsyncClient(timeout=15) as client:
+        # 总数 & 按分类
+        r_total = await client.get(
+            f"{SUPABASE_URL}/rest/v1/memories",
+            headers={**headers, "Prefer": "count=exact"},
+            params={"select": "id", "forgotten": "eq.false", "limit": "1"}
+        )
+        total = int(r_total.headers.get("content-range", "0/0").split("/")[-1]) if r_total.status_code < 400 else 0
+
+        # 权重分布
+        r_weights = await client.get(
+            f"{SUPABASE_URL}/rest/v1/memories",
+            headers=headers,
+            params={"select": "weight,category", "forgotten": "eq.false", "limit": "1000"}
+        )
+        rows = r_weights.json() if r_weights.status_code < 400 else []
+
+    weight_buckets = {"高(>0.8)": 0, "中(0.5-0.8)": 0, "低(0.2-0.5)": 0, "濒危(<0.2)": 0}
+    category_count: dict = {}
+    at_risk = []
+
+    for row in rows:
+        w = row.get("weight", 0.6)
+        cat = row.get("category") or "未分类"
+        category_count[cat] = category_count.get(cat, 0) + 1
+        if w > 0.8:
+            weight_buckets["高(>0.8)"] += 1
+        elif w >= 0.5:
+            weight_buckets["中(0.5-0.8)"] += 1
+        elif w >= 0.2:
+            weight_buckets["低(0.2-0.5)"] += 1
+        else:
+            weight_buckets["濒危(<0.2)"] += 1
+            at_risk.append({"weight": round(w, 3), "category": cat})
+
+    return {
+        "total": total,
+        "weight_distribution": weight_buckets,
+        "by_category": category_count,
+        "at_risk_count": len(at_risk),
+        "at_risk_samples": at_risk[:5]
+    }
+
+
+async def tool_get_weather(city: str, forecast: bool = False) -> dict:
+    """直接用城市名查天气，内部自动 geocode"""
+    # 1. geocode
+    geo = await amap_geocode(city)
+    if geo.get("status") != "1" or not geo.get("geocodes"):
+        return {"error": f"找不到城市：{city}"}
+    adcode = geo["geocodes"][0].get("adcode", "")
+    if not adcode:
+        return {"error": "geocode 未返回 adcode"}
+    # 2. 查天气
+    extensions = "all" if forecast else "base"
+    weather = await amap_weather(adcode, extensions=extensions)
+    return weather
