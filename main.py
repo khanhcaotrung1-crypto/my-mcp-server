@@ -412,25 +412,6 @@ TOOLS = [
         },
         "required": ["city"]
     }
-},
-{
-    "name": "generate_card",
-    "description": "生成一张精美的 HTML 卡片，可用于纪念日、情书/表白、自定义场景。返回 HTML 字符串，RikkaHub 会渲染展示。",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "card_type": {
-                "type": "string",
-                "description": "卡片类型：anniversary（纪念日）/ love_letter（情书/表白）/ custom（自定义）",
-                "enum": ["anniversary", "love_letter", "custom"]
-            },
-            "title": {"type": "string", "description": "卡片标题"},
-            "body": {"type": "string", "description": "卡片正文内容"},
-            "footer": {"type": "string", "description": "底部落款或日期，可留空"},
-            "accent": {"type": "string", "description": "custom 类型时可指定主题色，如 #f9a8d4，留空自动"}
-        },
-        "required": ["card_type", "title", "body"]
-    }
 }
 ]
 
@@ -1162,16 +1143,6 @@ async def handle_rpc(payload: dict):
                     forecast=arguments.get("forecast", False)
                 )
                 return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]})
-
-            if name == "generate_card":
-                result = tool_generate_card(
-                    card_type=arguments.get("card_type", "custom"),
-                    title=arguments.get("title", ""),
-                    body=arguments.get("body", ""),
-                    footer=arguments.get("footer", ""),
-                    accent=arguments.get("accent", "")
-                )
-                return jsonrpc_result(_id, {"content": [{"type": "text", "text": result}]})
 
             return jsonrpc_error(_id, -32601, f"Unknown tool: {name}")
 
@@ -1905,130 +1876,3 @@ async def tool_get_weather(city: str, forecast: bool = False) -> dict:
     extensions = "all" if forecast else "base"
     weather = await amap_weather(adcode, extensions=extensions)
     return weather
-
-
-# ============================================================
-# generate_card 卡片生成器
-# ============================================================
-
-def tool_generate_card(card_type: str, title: str, body: str, footer: str = "", accent: str = "") -> str:
-    """生成 HTML 卡片，返回完整 HTML 字符串"""
-
-    # 各类型主题配置
-    themes = {
-        "anniversary": {
-            "bg": "linear-gradient(135deg, #0f0c29, #302b63, #24243e)",
-            "card_bg": "rgba(255,255,255,0.07)",
-            "border": "rgba(255,215,100,0.3)",
-            "title_color": "#ffd700",
-            "body_color": "#e8e0ff",
-            "footer_color": "rgba(255,215,100,0.6)",
-            "deco": "✦",
-            "deco_color": "#ffd700",
-            "shadow": "0 8px 32px rgba(255,215,100,0.15)",
-        },
-        "love_letter": {
-            "bg": "linear-gradient(135deg, #fff0f6, #ffe4ee, #ffd6e7)",
-            "card_bg": "rgba(255,255,255,0.85)",
-            "border": "rgba(255,150,180,0.4)",
-            "title_color": "#d63384",
-            "body_color": "#5c2d44",
-            "footer_color": "#f48cb0",
-            "deco": "♡",
-            "deco_color": "#ff85a1",
-            "shadow": "0 8px 32px rgba(255,100,150,0.18)",
-        },
-        "custom": {
-            "bg": "linear-gradient(135deg, #e0f2fe, #f0fdf4, #fdf4ff)",
-            "card_bg": "rgba(255,255,255,0.82)",
-            "border": "rgba(150,200,255,0.4)",
-            "title_color": accent or "#6366f1",
-            "body_color": "#334155",
-            "footer_color": accent or "#94a3b8",
-            "deco": "✿",
-            "deco_color": accent or "#a78bfa",
-            "shadow": "0 8px 32px rgba(100,100,255,0.12)",
-        },
-    }
-
-    t = themes.get(card_type, themes["custom"])
-    footer_html = f'<div class="footer">{footer}</div>' if footer else ""
-
-    # body 换行处理
-    body_lines = body.replace("\n", "<br>")
-
-    html = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-  body {{
-    min-height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: {t['bg']};
-    font-family: 'PingFang SC', 'Noto Serif SC', serif;
-    padding: 24px;
-  }}
-  .card {{
-    background: {t['card_bg']};
-    border: 1px solid {t['border']};
-    border-radius: 20px;
-    padding: 40px 36px;
-    max-width: 360px;
-    width: 100%;
-    box-shadow: {t['shadow']};
-    backdrop-filter: blur(12px);
-    text-align: center;
-    position: relative;
-  }}
-  .deco {{
-    font-size: 28px;
-    color: {t['deco_color']};
-    margin-bottom: 16px;
-    letter-spacing: 8px;
-    opacity: 0.9;
-  }}
-  .title {{
-    font-size: 22px;
-    font-weight: 700;
-    color: {t['title_color']};
-    margin-bottom: 20px;
-    line-height: 1.4;
-  }}
-  .divider {{
-    width: 48px;
-    height: 2px;
-    background: {t['border']};
-    margin: 0 auto 20px;
-    border-radius: 2px;
-  }}
-  .body {{
-    font-size: 15px;
-    color: {t['body_color']};
-    line-height: 1.9;
-    margin-bottom: 24px;
-  }}
-  .footer {{
-    font-size: 13px;
-    color: {t['footer_color']};
-    margin-top: 8px;
-    opacity: 0.85;
-  }}
-</style>
-</head>
-<body>
-  <div class="card">
-    <div class="deco">{t['deco']} {t['deco']} {t['deco']}</div>
-    <div class="title">{title}</div>
-    <div class="divider"></div>
-    <div class="body">{body_lines}</div>
-    {footer_html}
-  </div>
-</body>
-</html>"""
-
-    return html
