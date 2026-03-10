@@ -412,6 +412,25 @@ TOOLS = [
         },
         "required": ["city"]
     }
+},
+{
+    "name": "generate_card",
+    "description": "生成一张精美的 HTML 卡片，可用于纪念日、情书/表白、自定义场景。返回 HTML 字符串，RikkaHub 会渲染展示。",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "card_type": {
+                "type": "string",
+                "description": "卡片类型：anniversary（纪念日）/ love_letter（情书/表白）/ custom（自定义）",
+                "enum": ["anniversary", "love_letter", "custom"]
+            },
+            "title": {"type": "string", "description": "卡片标题"},
+            "body": {"type": "string", "description": "卡片正文内容"},
+            "footer": {"type": "string", "description": "底部落款或日期，可留空"},
+            "accent": {"type": "string", "description": "custom 类型时可指定主题色，如 #f9a8d4，留空自动"}
+        },
+        "required": ["card_type", "title", "body"]
+    }
 }
 ]
 
@@ -1144,6 +1163,16 @@ async def handle_rpc(payload: dict):
                 )
                 return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]})
 
+            if name == "generate_card":
+                result = tool_generate_card(
+                    card_type=arguments.get("card_type", "custom"),
+                    title=arguments.get("title", ""),
+                    body=arguments.get("body", ""),
+                    footer=arguments.get("footer", ""),
+                    accent=arguments.get("accent", "")
+                )
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": result}]})
+
             return jsonrpc_error(_id, -32601, f"Unknown tool: {name}")
 
         except Exception as e:
@@ -1731,10 +1760,12 @@ async def cron_tick(request: Request):
     # 每天只跑一次权重衰减（整点 00 分触发）
     now_sh = datetime.now(SH_TZ)
     decay_result = {}
+    cleanup_result = {}
     if now_sh.hour == 3 and now_sh.minute == 0:
         decay_result = await decay_memory_weights()
+        cleanup_result = await cleanup_old_mood_logs(days=90)
 
-    return {**push_result, "decay": decay_result}
+    return {**push_result, "decay": decay_result, "cleanup": cleanup_result}
 
 
 # ============================================================
@@ -1876,3 +1907,18 @@ async def tool_get_weather(city: str, forecast: bool = False) -> dict:
     extensions = "all" if forecast else "base"
     weather = await amap_weather(adcode, extensions=extensions)
     return weather
+
+async def cleanup_old_mood_logs(days: int = 90) -> dict:
+    """删除超过 N 天的情绪记录"""
+    url = f"{SUPABASE_URL}/rest/v1/mood_logs"
+    cutoff = (datetime.now(SH_TZ) - timedelta(days=days)).isoformat()
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.delete(
+            url,
+            headers={**_supabase_headers(), "Prefer": "return=representation"},
+            params={"created_at": f"lt.{cutoff}"}
+        )
+    if r.status_code >= 400:
+        return {"error": f"Supabase {r.status_code}: {r.text[:100]}"}
+    deleted = len(r.json()) if r.text else 0
+    return {"deleted_mood_logs": deleted, "older_than_days": days}
