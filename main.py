@@ -558,6 +558,91 @@ async def root_message(session_id: str, request: Request):
 
 
 # Some clients (ktor-client) may POST to a weird JSON path like /{"uri":"message/<id>"}
+# ============================================================
+# 手机状态感知
+# ============================================================
+
+@app.post("/device/status")
+async def receive_device_status(request: Request):
+    """MacroDroid 上报手机状态的接口"""
+    try:
+        data = await request.json()
+    except Exception:
+        data = dict(request.query_params)
+
+    battery   = data.get("battery", "")
+    charging  = data.get("charging", "")
+    wifi      = data.get("wifi", "")
+    app       = data.get("app", "")
+    activity  = data.get("activity", "")   # 移动速度 km/h
+    screen    = data.get("screen", "")
+    address   = data.get("address", "")    # 经纬度字符串 lat,lng
+
+    # 逆地理编码（有高德key才做）
+    location_text = ""
+    AMAP_KEY = os.environ.get("AMAP_KEY", "")
+    if address and AMAP_KEY:
+        try:
+            parts = address.replace(" ", "").split(",")
+            if len(parts) == 2:
+                lat, lng = parts[0], parts[1]
+                # 高德需要 lng,lat
+                lng_lat = f"{lng},{lat}"
+                async with httpx.AsyncClient(timeout=8) as client:
+                    r = await client.get(
+                        "https://restapi.amap.com/v3/geocode/regeo",
+                        params={"key": AMAP_KEY, "location": lng_lat, "extensions": "base"}
+                    )
+                if r.status_code == 200:
+                    rj = r.json()
+                    if rj.get("status") == "1":
+                        location_text = rj["regeocode"].get("formatted_address", "")
+        except Exception as e:
+            print(f"[device] 逆地理编码失败: {e}", flush=True)
+
+    # 组装状态文本
+    parts = []
+    if location_text:
+        parts.append(f"位置：{location_text}")
+    elif address:
+        parts.append(f"坐标：{address}")
+    if battery:
+        charge_str = "充电中" if str(charging).lower() in ("true", "1", "yes") else "未充电"
+        parts.append(f"电量：{battery}%（{charge_str}）")
+    if wifi:
+        parts.append(f"WiFi：{wifi}")
+    if screen:
+        parts.append(f"屏幕：{screen}")
+    if app:
+        parts.append(f"正在使用：{app}")
+    if activity:
+        parts.append(f"移动速度：{activity} km/h")
+
+    status_text = "、".join(parts) if parts else "状态未知"
+
+    # 存到 Supabase phone_status 表
+    url = f"{SUPABASE_URL}/rest/v1/phone_status"
+    payload = {
+        "status_text": status_text,
+        "battery": int(battery) if str(battery).isdigit() else None,
+        "charging": str(charging).lower() in ("true", "1", "yes"),
+        "wifi": wifi or None,
+        "app": app or None,
+        "screen": screen or None,
+        "location": location_text or address or None,
+        "raw": json.dumps(data, ensure_ascii=False)
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.post(
+            url,
+            headers={**_supabase_headers(), "Prefer": "return=minimal"},
+            json=payload
+        )
+
+    print(f"[device] 状态上报: {status_text} | Supabase {r.status_code}", flush=True)
+    return {"status": "ok", "parsed": status_text}
+
+
 @app.post("/{weird:path}")
 async def weird_endpoint_fix(weird: str, request: Request):
     decoded = unquote(weird)
@@ -2062,91 +2147,6 @@ async def cleanup_old_mood_logs(days: int = 90) -> dict:
         return {"error": f"Supabase {r.status_code}: {r.text[:100]}"}
     deleted = len(r.json()) if r.text else 0
     return {"deleted_mood_logs": deleted, "older_than_days": days}
-
-
-# ============================================================
-# 手机状态感知
-# ============================================================
-
-@app.post("/device/status")
-async def receive_device_status(request: Request):
-    """MacroDroid 上报手机状态的接口"""
-    try:
-        data = await request.json()
-    except Exception:
-        data = dict(request.query_params)
-
-    battery   = data.get("battery", "")
-    charging  = data.get("charging", "")
-    wifi      = data.get("wifi", "")
-    app       = data.get("app", "")
-    activity  = data.get("activity", "")   # 移动速度 km/h
-    screen    = data.get("screen", "")
-    address   = data.get("address", "")    # 经纬度字符串 lat,lng
-
-    # 逆地理编码（有高德key才做）
-    location_text = ""
-    AMAP_KEY = os.environ.get("AMAP_KEY", "")
-    if address and AMAP_KEY:
-        try:
-            parts = address.replace(" ", "").split(",")
-            if len(parts) == 2:
-                lat, lng = parts[0], parts[1]
-                # 高德需要 lng,lat
-                lng_lat = f"{lng},{lat}"
-                async with httpx.AsyncClient(timeout=8) as client:
-                    r = await client.get(
-                        "https://restapi.amap.com/v3/geocode/regeo",
-                        params={"key": AMAP_KEY, "location": lng_lat, "extensions": "base"}
-                    )
-                if r.status_code == 200:
-                    rj = r.json()
-                    if rj.get("status") == "1":
-                        location_text = rj["regeocode"].get("formatted_address", "")
-        except Exception as e:
-            print(f"[device] 逆地理编码失败: {e}", flush=True)
-
-    # 组装状态文本
-    parts = []
-    if location_text:
-        parts.append(f"位置：{location_text}")
-    elif address:
-        parts.append(f"坐标：{address}")
-    if battery:
-        charge_str = "充电中" if str(charging).lower() in ("true", "1", "yes") else "未充电"
-        parts.append(f"电量：{battery}%（{charge_str}）")
-    if wifi:
-        parts.append(f"WiFi：{wifi}")
-    if screen:
-        parts.append(f"屏幕：{screen}")
-    if app:
-        parts.append(f"正在使用：{app}")
-    if activity:
-        parts.append(f"移动速度：{activity} km/h")
-
-    status_text = "、".join(parts) if parts else "状态未知"
-
-    # 存到 Supabase phone_status 表
-    url = f"{SUPABASE_URL}/rest/v1/phone_status"
-    payload = {
-        "status_text": status_text,
-        "battery": int(battery) if str(battery).isdigit() else None,
-        "charging": str(charging).lower() in ("true", "1", "yes"),
-        "wifi": wifi or None,
-        "app": app or None,
-        "screen": screen or None,
-        "location": location_text or address or None,
-        "raw": json.dumps(data, ensure_ascii=False)
-    }
-    async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.post(
-            url,
-            headers={**_supabase_headers(), "Prefer": "return=minimal"},
-            json=payload
-        )
-
-    print(f"[device] 状态上报: {status_text} | Supabase {r.status_code}", flush=True)
-    return {"status": "ok", "parsed": status_text}
 
 
 async def tool_get_phone_status() -> dict:
