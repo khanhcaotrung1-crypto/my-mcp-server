@@ -2150,12 +2150,12 @@ async def cleanup_old_mood_logs(days: int = 90) -> dict:
 
 
 async def tool_get_phone_status() -> dict:
-    """查询最新手机状态"""
+    """查询最近几条手机状态"""
     url = f"{SUPABASE_URL}/rest/v1/phone_status"
     params = {
-        "select": "status_text,battery,charging,wifi,app,screen,location,created_at",
+        "select": "status_text,created_at",
         "order": "created_at.desc",
-        "limit": "1"
+        "limit": "5"
     }
     async with httpx.AsyncClient(timeout=10) as client:
         r = await client.get(url, headers=_supabase_headers(), params=params)
@@ -2166,15 +2166,16 @@ async def tool_get_phone_status() -> dict:
     if not rows:
         return {"error": "暂无状态记录，MacroDroid 可能还未上报"}
 
-    row = rows[0]
-    # 格式化时间
-    created_at = row.get("created_at", "")
-    try:
-        from datetime import timezone as _tz, timedelta as _td
-        dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-        sh_time = dt.astimezone(_tz(timedelta(hours=8))).strftime("%H:%M")
-        row["updated_at"] = sh_time
-    except Exception:
-        row["updated_at"] = created_at
+    from datetime import timezone as _tz
+    results = []
+    for row in rows:
+        try:
+            dt = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
+            sh_now = datetime.now(_tz(timedelta(hours=8)))
+            diff = int((sh_now - dt.astimezone(_tz(timedelta(hours=8)))).total_seconds() / 60)
+            time_hint = f"{diff}分钟前" if diff > 0 else "刚刚"
+            results.append(f"[{time_hint}] {row['status_text']}")
+        except Exception:
+            results.append(row.get("status_text", ""))
 
-    return row
+    return {"records": results}
