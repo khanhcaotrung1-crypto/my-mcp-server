@@ -402,6 +402,14 @@ TOOLS = [
     }
 },
 {
+    "name": "get_phone_status",
+    "description": "查询念念手机的实时状态：当前位置、电量、正在用的APP、是否充电、WiFi等。当对话中涉及念念在哪、在干什么、状态如何时主动调用。",
+    "inputSchema": {
+        "type": "object",
+        "properties": {}
+    }
+},
+{
     "name": "get_weather",
     "description": "直接用城市名查询天气，封装了地理编码步骤",
     "inputSchema": {
@@ -411,6 +419,25 @@ TOOLS = [
             "forecast": {"type": "boolean", "description": "true 返回未来几天预报，false 返回实时天气，默认 false"}
         },
         "required": ["city"]
+    }
+},
+{
+    "name": "generate_card",
+    "description": "生成一张精美的 HTML 卡片，可用于纪念日、情书/表白、自定义场景。返回 HTML 字符串，RikkaHub 会渲染展示。",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "card_type": {
+                "type": "string",
+                "description": "卡片类型：anniversary（纪念日）/ love_letter（情书/表白）/ custom（自定义）",
+                "enum": ["anniversary", "love_letter", "custom"]
+            },
+            "title": {"type": "string", "description": "卡片标题"},
+            "body": {"type": "string", "description": "卡片正文内容"},
+            "footer": {"type": "string", "description": "底部落款或日期，可留空"},
+            "accent": {"type": "string", "description": "custom 类型时可指定主题色，如 #f9a8d4，留空自动"}
+        },
+        "required": ["card_type", "title", "body"]
     }
 }
 ]
@@ -1135,6 +1162,10 @@ async def handle_rpc(payload: dict):
 
             if name == "get_memory_stats":
                 result = await tool_get_memory_stats()
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]})
+
+            if name == "get_phone_status":
+                result = await tool_get_phone_status()
                 return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]})
 
             if name == "get_weather":
@@ -1889,6 +1920,134 @@ async def tool_get_weather(city: str, forecast: bool = False) -> dict:
     weather = await amap_weather(adcode, extensions=extensions)
     return weather
 
+
+# ============================================================
+# generate_card 卡片生成器
+# ============================================================
+
+def tool_generate_card(card_type: str, title: str, body: str, footer: str = "", accent: str = "") -> str:
+    """生成 HTML 卡片，返回完整 HTML 字符串"""
+
+    # 各类型主题配置
+    themes = {
+        "anniversary": {
+            "bg": "linear-gradient(135deg, #0f0c29, #302b63, #24243e)",
+            "card_bg": "rgba(255,255,255,0.07)",
+            "border": "rgba(255,215,100,0.3)",
+            "title_color": "#ffd700",
+            "body_color": "#e8e0ff",
+            "footer_color": "rgba(255,215,100,0.6)",
+            "deco": "✦",
+            "deco_color": "#ffd700",
+            "shadow": "0 8px 32px rgba(255,215,100,0.15)",
+        },
+        "love_letter": {
+            "bg": "linear-gradient(135deg, #fff0f6, #ffe4ee, #ffd6e7)",
+            "card_bg": "rgba(255,255,255,0.85)",
+            "border": "rgba(255,150,180,0.4)",
+            "title_color": "#d63384",
+            "body_color": "#5c2d44",
+            "footer_color": "#f48cb0",
+            "deco": "♡",
+            "deco_color": "#ff85a1",
+            "shadow": "0 8px 32px rgba(255,100,150,0.18)",
+        },
+        "custom": {
+            "bg": "linear-gradient(135deg, #e0f2fe, #f0fdf4, #fdf4ff)",
+            "card_bg": "rgba(255,255,255,0.82)",
+            "border": "rgba(150,200,255,0.4)",
+            "title_color": accent or "#6366f1",
+            "body_color": "#334155",
+            "footer_color": accent or "#94a3b8",
+            "deco": "✿",
+            "deco_color": accent or "#a78bfa",
+            "shadow": "0 8px 32px rgba(100,100,255,0.12)",
+        },
+    }
+
+    t = themes.get(card_type, themes["custom"])
+    footer_html = f'<div class="footer">{footer}</div>' if footer else ""
+
+    # body 换行处理
+    body_lines = body.replace("\n", "<br>")
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: {t['bg']};
+    font-family: 'PingFang SC', 'Noto Serif SC', serif;
+    padding: 24px;
+  }}
+  .card {{
+    background: {t['card_bg']};
+    border: 1px solid {t['border']};
+    border-radius: 20px;
+    padding: 40px 36px;
+    max-width: 360px;
+    width: 100%;
+    box-shadow: {t['shadow']};
+    backdrop-filter: blur(12px);
+    text-align: center;
+    position: relative;
+  }}
+  .deco {{
+    font-size: 28px;
+    color: {t['deco_color']};
+    margin-bottom: 16px;
+    letter-spacing: 8px;
+    opacity: 0.9;
+  }}
+  .title {{
+    font-size: 22px;
+    font-weight: 700;
+    color: {t['title_color']};
+    margin-bottom: 20px;
+    line-height: 1.4;
+  }}
+  .divider {{
+    width: 48px;
+    height: 2px;
+    background: {t['border']};
+    margin: 0 auto 20px;
+    border-radius: 2px;
+  }}
+  .body {{
+    font-size: 15px;
+    color: {t['body_color']};
+    line-height: 1.9;
+    margin-bottom: 24px;
+  }}
+  .footer {{
+    font-size: 13px;
+    color: {t['footer_color']};
+    margin-top: 8px;
+    opacity: 0.85;
+  }}
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="deco">{t['deco']} {t['deco']} {t['deco']}</div>
+    <div class="title">{title}</div>
+    <div class="divider"></div>
+    <div class="body">{body_lines}</div>
+    {footer_html}
+  </div>
+</body>
+</html>"""
+
+    return html
+
+
 async def cleanup_old_mood_logs(days: int = 90) -> dict:
     """删除超过 N 天的情绪记录"""
     url = f"{SUPABASE_URL}/rest/v1/mood_logs"
@@ -1903,3 +2062,119 @@ async def cleanup_old_mood_logs(days: int = 90) -> dict:
         return {"error": f"Supabase {r.status_code}: {r.text[:100]}"}
     deleted = len(r.json()) if r.text else 0
     return {"deleted_mood_logs": deleted, "older_than_days": days}
+
+
+# ============================================================
+# 手机状态感知
+# ============================================================
+
+@app.post("/device/status")
+async def receive_device_status(request: Request):
+    """MacroDroid 上报手机状态的接口"""
+    try:
+        data = await request.json()
+    except Exception:
+        data = dict(request.query_params)
+
+    battery   = data.get("battery", "")
+    charging  = data.get("charging", "")
+    wifi      = data.get("wifi", "")
+    app       = data.get("app", "")
+    activity  = data.get("activity", "")   # 移动速度 km/h
+    screen    = data.get("screen", "")
+    address   = data.get("address", "")    # 经纬度字符串 lat,lng
+
+    # 逆地理编码（有高德key才做）
+    location_text = ""
+    AMAP_KEY = os.environ.get("AMAP_KEY", "")
+    if address and AMAP_KEY:
+        try:
+            parts = address.replace(" ", "").split(",")
+            if len(parts) == 2:
+                lat, lng = parts[0], parts[1]
+                # 高德需要 lng,lat
+                lng_lat = f"{lng},{lat}"
+                async with httpx.AsyncClient(timeout=8) as client:
+                    r = await client.get(
+                        "https://restapi.amap.com/v3/geocode/regeo",
+                        params={"key": AMAP_KEY, "location": lng_lat, "extensions": "base"}
+                    )
+                if r.status_code == 200:
+                    rj = r.json()
+                    if rj.get("status") == "1":
+                        location_text = rj["regeocode"].get("formatted_address", "")
+        except Exception as e:
+            print(f"[device] 逆地理编码失败: {e}", flush=True)
+
+    # 组装状态文本
+    parts = []
+    if location_text:
+        parts.append(f"位置：{location_text}")
+    elif address:
+        parts.append(f"坐标：{address}")
+    if battery:
+        charge_str = "充电中" if str(charging).lower() in ("true", "1", "yes") else "未充电"
+        parts.append(f"电量：{battery}%（{charge_str}）")
+    if wifi:
+        parts.append(f"WiFi：{wifi}")
+    if screen:
+        parts.append(f"屏幕：{screen}")
+    if app:
+        parts.append(f"正在使用：{app}")
+    if activity:
+        parts.append(f"移动速度：{activity} km/h")
+
+    status_text = "、".join(parts) if parts else "状态未知"
+
+    # 存到 Supabase phone_status 表
+    url = f"{SUPABASE_URL}/rest/v1/phone_status"
+    payload = {
+        "status_text": status_text,
+        "battery": int(battery) if str(battery).isdigit() else None,
+        "charging": str(charging).lower() in ("true", "1", "yes"),
+        "wifi": wifi or None,
+        "app": app or None,
+        "screen": screen or None,
+        "location": location_text or address or None,
+        "raw": json.dumps(data, ensure_ascii=False)
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.post(
+            url,
+            headers={**_supabase_headers(), "Prefer": "return=minimal"},
+            json=payload
+        )
+
+    print(f"[device] 状态上报: {status_text} | Supabase {r.status_code}", flush=True)
+    return {"status": "ok", "parsed": status_text}
+
+
+async def tool_get_phone_status() -> dict:
+    """查询最新手机状态"""
+    url = f"{SUPABASE_URL}/rest/v1/phone_status"
+    params = {
+        "select": "status_text,battery,charging,wifi,app,screen,location,created_at",
+        "order": "created_at.desc",
+        "limit": "1"
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get(url, headers=_supabase_headers(), params=params)
+
+    if r.status_code >= 400:
+        return {"error": f"Supabase {r.status_code}"}
+    rows = r.json()
+    if not rows:
+        return {"error": "暂无状态记录，MacroDroid 可能还未上报"}
+
+    row = rows[0]
+    # 格式化时间
+    created_at = row.get("created_at", "")
+    try:
+        from datetime import timezone as _tz, timedelta as _td
+        dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        sh_time = dt.astimezone(_tz(timedelta(hours=8))).strftime("%H:%M")
+        row["updated_at"] = sh_time
+    except Exception:
+        row["updated_at"] = created_at
+
+    return row
