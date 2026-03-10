@@ -412,25 +412,6 @@ TOOLS = [
         },
         "required": ["city"]
     }
-},
-{
-    "name": "generate_card",
-    "description": "生成一张精美的 HTML 卡片，可用于纪念日、情书/表白、自定义场景。返回 HTML 字符串，RikkaHub 会渲染展示。",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "card_type": {
-                "type": "string",
-                "description": "卡片类型：anniversary（纪念日）/ love_letter（情书/表白）/ custom（自定义）",
-                "enum": ["anniversary", "love_letter", "custom"]
-            },
-            "title": {"type": "string", "description": "卡片标题"},
-            "body": {"type": "string", "description": "卡片正文内容"},
-            "footer": {"type": "string", "description": "底部落款或日期，可留空"},
-            "accent": {"type": "string", "description": "custom 类型时可指定主题色，如 #f9a8d4，留空自动"}
-        },
-        "required": ["card_type", "title", "body"]
-    }
 }
 ]
 
