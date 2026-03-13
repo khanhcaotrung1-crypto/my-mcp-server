@@ -47,6 +47,7 @@ AMAP_KEY = os.getenv("AMAP_KEY") or ""
 PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN") or ""
 NOTION_TOKEN = (os.getenv("NOTION_TOKEN") or "").strip()
 TAVILY_API_KEY = (os.getenv("TAVILY_API_KEY") or "").strip()
+SILICONFLOW_KEY = (os.getenv("SILICONFLOW_KEY") or "").strip()
 
 # ---------- MCP tool definitions ----------
 TOOLS = [
@@ -438,6 +439,18 @@ TOOLS = [
             "accent": {"type": "string", "description": "custom 类型时可指定主题色，如 #f9a8d4，留空自动"}
         },
         "required": ["card_type", "title", "body"]
+    }
+},
+{
+    "name": "generate_image",
+    "description": "根据描述词生成一张图片，返回图片URL。当用户要求画图、生成图片、或你自己想配图时调用。",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "prompt": {"type": "string", "description": "图片描述词，建议用英文以获得更好效果"},
+            "size": {"type": "string", "description": "图片尺寸，可选：1024x1024 / 768x1344 / 1344x768，默认1024x1024", "default": "1024x1024"}
+        },
+        "required": ["prompt"]
     }
 }
 ]
@@ -1270,6 +1283,13 @@ async def handle_rpc(payload: dict):
                 )
                 return jsonrpc_result(_id, {"content": [{"type": "text", "text": result}]})
 
+            if name == "generate_image":
+                result = await tool_generate_image(
+                    prompt=arguments.get("prompt", ""),
+                    size=arguments.get("size", "1024x1024")
+                )
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]})
+
             return jsonrpc_error(_id, -32601, f"Unknown tool: {name}")
 
         except Exception as e:
@@ -2006,6 +2026,40 @@ async def tool_get_weather(city: str, forecast: bool = False) -> dict:
     return weather
 
 
+async def tool_generate_image(prompt: str, size: str = "1024x1024") -> dict:
+    """调用硅基流动 FLUX.1-schnell 生成图片，返回图片URL"""
+    if not SILICONFLOW_KEY:
+        return {"error": "未配置 SILICONFLOW_KEY，请在 Railway 环境变量里添加"}
+    if not prompt:
+        return {"error": "prompt 不能为空"}
+    url = "https://api.siliconflow.cn/v1/images/generations"
+    headers = {
+        "Authorization": f"Bearer {SILICONFLOW_KEY}",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "model": "black-forest-labs/FLUX.1-schnell",
+        "prompt": prompt,
+        "image_size": size,
+        "num_inference_steps": 4,
+        "batch_size": 1,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(url, headers=headers, json=body)
+        if r.status_code >= 400:
+            return {"error": f"硅基流动返回错误 {r.status_code}: {r.text[:300]}"}
+        data = r.json()
+        image_url = data["images"][0]["url"]
+        return {
+            "image_url": image_url,
+            "message": f"图片已生成！点击链接查看：{image_url}",
+            "prompt": prompt,
+        }
+    except Exception as e:
+        return {"error": f"生图失败：{e}"}
+
+
 # ============================================================
 # generate_card 卡片生成器
 # ============================================================
@@ -2165,6 +2219,8 @@ async def tool_get_phone_status() -> dict:
     rows = r.json()
     if not rows:
         return {"error": "暂无状态记录，MacroDroid 可能还未上报"}
+
+    rows = list(reversed(rows))  # 改为旧→新，最后一条是最新状态
 
     from datetime import timezone as _tz
     results = []
