@@ -458,6 +458,37 @@ TOOLS = [
 # ---------- SSE sessions ----------
 SESSIONS: Dict[str, "asyncio.Queue[dict]"] = {}
 
+
+async def _save_session(session_id: str):
+    """把 session_id 持久化到 Supabase"""
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        return
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            await client.post(
+                f"{SUPABASE_URL}/rest/v1/mcp_sessions",
+                headers={**_supabase_headers(), "Prefer": "return=minimal"},
+                json={"session_id": session_id}
+            )
+    except Exception as e:
+        print(f"[MCP] save_session error: {e}", flush=True)
+
+
+async def _session_exists_in_db(session_id: str) -> bool:
+    """检查 session_id 是否在 Supabase 里"""
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get(
+                f"{SUPABASE_URL}/rest/v1/mcp_sessions",
+                headers=_supabase_headers(),
+                params={"session_id": f"eq.{session_id}", "select": "session_id", "limit": "1"}
+            )
+        return r.status_code == 200 and bool(r.json())
+    except Exception:
+        return False
+
 from fastapi import Request
 from fastapi.responses import StreamingResponse
 
@@ -486,6 +517,7 @@ async def mcp_entry(request: Request):
     # 2) 否则当作“握手”请求：创建 session，返回 endpoint 信息（非流式）
     session_id = uuid.uuid4().hex
     SESSIONS[session_id] = asyncio.Queue()
+    await _save_session(session_id)
     return JSONResponse(
         {"type": "endpoint", "uri": f"message/{session_id}", "ok": True},
         status_code=200,
@@ -688,7 +720,13 @@ def jsonrpc_error(_id: Any, code: int, message: str, data: Any = None):
 
 async def _handle_message(session_id: str, request: Request):
     if session_id not in SESSIONS:
-        raise HTTPException(status_code=404, detail="Unknown session")
+        # 内存里没有，去 Supabase 查是否是重启前的合法 session
+        exists = await _session_exists_in_db(session_id)
+        if not exists:
+            raise HTTPException(status_code=404, detail="Unknown session")
+        # 合法 session，重建队列
+        SESSIONS[session_id] = asyncio.Queue()
+        print(f"[MCP] session {session_id[:8]}... restored from DB", flush=True)
 
     try:
         payload = await request.json()
