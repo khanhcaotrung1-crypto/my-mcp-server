@@ -764,18 +764,30 @@ async def embed_text(text: str) -> List[float]:
     }
     body = {"model": EMBEDDING_MODEL, "input": text}
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(url, headers=headers, json=body)
+    last_err = None
+    for attempt in range(3):  # 最多重试3次
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                r = await client.post(url, headers=headers, json=body)
+            if r.status_code >= 400:
+                raise RuntimeError(f"Embeddings HTTP {r.status_code}: {r.text}")
+            data = r.json()
+            try:
+                return data["data"][0]["embedding"]
+            except Exception:
+                raise RuntimeError(f"Bad embeddings response: {data}")
+        except httpx.TimeoutException as e:
+            last_err = e
+            print(f"[embed] timeout on attempt {attempt + 1}, retrying...", flush=True)
+            await asyncio.sleep(1)
+        except RuntimeError:
+            raise
+        except Exception as e:
+            last_err = e
+            print(f"[embed] error on attempt {attempt + 1}: {e}, retrying...", flush=True)
+            await asyncio.sleep(1)
 
-    if r.status_code >= 400:
-        # Keep provider's error text for debugging
-        raise RuntimeError(f"Embeddings HTTP {r.status_code}: {r.text}")
-
-    data = r.json()
-    try:
-        return data["data"][0]["embedding"]
-    except Exception:
-        raise RuntimeError(f"Bad embeddings response: {data}")
+    raise RuntimeError(f"embed_text failed after 3 attempts: {last_err}")
 
 
 def _vec_to_pgvector_literal(vec: List[float]) -> str:
