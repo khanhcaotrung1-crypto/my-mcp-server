@@ -452,6 +452,37 @@ TOOLS = [
         },
         "required": ["prompt"]
     }
+},
+{
+    "name": "update_sangli_status",
+    "description": "更新桑梨自己今天的状态：当前在做什么、心情、所在位置。在对话中自然发生变化时（比如出门了、心情变了、开始做别的事）主动调用。",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "activity": {"type": "string", "description": "当前在做什么，可留空表示不更新"},
+            "mood": {"type": "string", "description": "今天的心情，一句自然的话，可留空表示不更新"},
+            "location": {"type": "string", "description": "现在在哪里，可留空表示不更新"}
+        }
+    }
+},
+{
+    "name": "add_sangli_small_event",
+    "description": "给桑梨今天的小事列表追加一条。当发生了一个值得记录的小细节或瞬间时调用，比如看到了什么、想到了什么、发生了什么小事。",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "event": {"type": "string", "description": "一两句话描述这件小事"}
+        },
+        "required": ["event"]
+    }
+},
+{
+    "name": "get_sangli_status",
+    "description": "查看桑梨今天的状态：在做什么、心情、位置、今天发生的小事。",
+    "inputSchema": {
+        "type": "object",
+        "properties": {}
+    }
 }
 ]
 
@@ -1340,6 +1371,24 @@ async def handle_rpc(payload: dict):
                 )
                 return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]})
 
+            if name == "update_sangli_status":
+                result = await tool_update_sangli_status(
+                    activity=arguments.get("activity", ""),
+                    mood=arguments.get("mood", ""),
+                    location=arguments.get("location", "")
+                )
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]})
+
+            if name == "add_sangli_small_event":
+                result = await tool_add_sangli_small_event(
+                    event=arguments.get("event", "")
+                )
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]})
+
+            if name == "get_sangli_status":
+                result = await tool_get_sangli_status()
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]})
+
             return jsonrpc_error(_id, -32601, f"Unknown tool: {name}")
 
         except Exception as e:
@@ -2074,6 +2123,89 @@ async def tool_get_weather(city: str, forecast: bool = False) -> dict:
     extensions = "all" if forecast else "base"
     weather = await amap_weather(adcode, extensions=extensions)
     return weather
+
+
+async def tool_update_sangli_status(activity: str = "", mood: str = "", location: str = "") -> dict:
+    """更新桑梨今日状态"""
+    today = datetime.now(SH_TZ).strftime("%Y-%m-%d")
+    url = f"{SUPABASE_URL}/rest/v1/sangli_status"
+    # 先查今天有没有记录
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get(url, headers=_supabase_headers(),
+                             params={"select": "date", "date": f"eq.{today}", "limit": "1"})
+    exists = r.status_code == 200 and bool(r.json())
+
+    patch = {"updated_at": datetime.now(SH_TZ).isoformat()}
+    if activity:
+        patch["activity"] = activity
+    if mood:
+        patch["mood"] = mood
+    if location:
+        patch["location"] = location
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        if exists:
+            r = await client.patch(
+                url, headers={**_supabase_headers(), "Prefer": "return=minimal"},
+                params={"date": f"eq.{today}"}, json=patch
+            )
+        else:
+            patch["date"] = today
+            if not patch.get("activity"):
+                patch["activity"] = ""
+            r = await client.post(
+                url, headers={**_supabase_headers(), "Prefer": "return=minimal"}, json=patch
+            )
+    if r.status_code >= 400:
+        return {"error": f"Supabase {r.status_code}: {r.text[:100]}"}
+    return {"ok": True, "updated": {k: v for k, v in patch.items() if k not in ("updated_at", "date")}}
+
+
+async def tool_add_sangli_small_event(event: str) -> dict:
+    """往桑梨今天的小事列表里追加一条"""
+    today = datetime.now(SH_TZ).strftime("%Y-%m-%d")
+    url = f"{SUPABASE_URL}/rest/v1/sangli_status"
+    # 读出当前 small_events
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get(url, headers=_supabase_headers(),
+                             params={"select": "small_events", "date": f"eq.{today}", "limit": "1"})
+    if r.status_code == 200 and r.json():
+        events = r.json()[0].get("small_events") or []
+        events.append(event)
+        async with httpx.AsyncClient(timeout=10) as client:
+            r2 = await client.patch(
+                url, headers={**_supabase_headers(), "Prefer": "return=minimal"},
+                params={"date": f"eq.{today}"},
+                json={"small_events": events, "updated_at": datetime.now(SH_TZ).isoformat()}
+            )
+        if r2.status_code >= 400:
+            return {"error": f"Supabase {r2.status_code}"}
+        return {"ok": True, "total_events": len(events)}
+    else:
+        # 今天没有记录，新建一条
+        async with httpx.AsyncClient(timeout=10) as client:
+            r2 = await client.post(
+                url, headers={**_supabase_headers(), "Prefer": "return=minimal"},
+                json={"date": today, "small_events": [event], "updated_at": datetime.now(SH_TZ).isoformat()}
+            )
+        if r2.status_code >= 400:
+            return {"error": f"Supabase {r2.status_code}"}
+        return {"ok": True, "total_events": 1}
+
+
+async def tool_get_sangli_status() -> dict:
+    """查看桑梨今日状态"""
+    today = datetime.now(SH_TZ).strftime("%Y-%m-%d")
+    url = f"{SUPABASE_URL}/rest/v1/sangli_status"
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get(url, headers=_supabase_headers(),
+                             params={"select": "*", "date": f"eq.{today}", "limit": "1"})
+    if r.status_code >= 400:
+        return {"error": f"Supabase {r.status_code}"}
+    rows = r.json()
+    if not rows:
+        return {"status": "今天还没有状态记录"}
+    return rows[0]
 
 
 async def tool_generate_image(prompt: str, size: str = "1024x1024") -> dict:
