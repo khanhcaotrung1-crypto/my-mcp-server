@@ -483,6 +483,37 @@ TOOLS = [
         "type": "object",
         "properties": {}
     }
+},
+{
+    "name": "add_sticker",
+    "description": "给念念贴一颗星星贴纸。当念念完成了某件值得鼓励的事（按时复习、早睡、喝水、做到了某个小目标等），主动调用这个工具给她贴纸，并告诉她贴了。",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "reason": {"type": "string", "description": "贴纸原因，一句话说明念念做了什么"}
+        },
+        "required": ["reason"]
+    }
+},
+{
+    "name": "get_stickers",
+    "description": "查看念念现在有多少颗星星贴纸，以及最近的贴纸记录。",
+    "inputSchema": {
+        "type": "object",
+        "properties": {}
+    }
+},
+{
+    "name": "redeem_stickers",
+    "description": "念念用星星贴纸兑换奖励时调用。扣除指定数量的贴纸，并给她一个专属奖励互动。",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "count": {"type": "integer", "description": "要兑换的贴纸数量"},
+            "reward_type": {"type": "string", "description": "奖励类型，比如：故事、小游戏、专属夸夸、撒娇时间"}
+        },
+        "required": ["count"]
+    }
 }
 ]
 
@@ -1389,6 +1420,21 @@ async def handle_rpc(payload: dict):
                 result = await tool_get_sangli_status()
                 return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]})
 
+            if name == "add_sticker":
+                result = await tool_add_sticker(reason=arguments.get("reason", ""))
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]})
+
+            if name == "get_stickers":
+                result = await tool_get_stickers()
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]})
+
+            if name == "redeem_stickers":
+                result = await tool_redeem_stickers(
+                    count=arguments.get("count", 1),
+                    reward_type=arguments.get("reward_type", "")
+                )
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]})
+
             return jsonrpc_error(_id, -32601, f"Unknown tool: {name}")
 
         except Exception as e:
@@ -2191,6 +2237,75 @@ async def tool_add_sangli_small_event(event: str) -> dict:
         if r2.status_code >= 400:
             return {"error": f"Supabase {r2.status_code}"}
         return {"ok": True, "total_events": 1}
+
+
+async def tool_add_sticker(reason: str) -> dict:
+    """给念念贴一颗星星贴纸"""
+    url = f"{SUPABASE_URL}/rest/v1/star_stickers"
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.post(
+            url,
+            headers={**_supabase_headers(), "Prefer": "return=minimal"},
+            json={"reason": reason}
+        )
+    if r.status_code >= 400:
+        return {"error": f"Supabase {r.status_code}: {r.text[:100]}"}
+    # 查总数
+    r2 = await client.get(
+        url,
+        headers={**_supabase_headers(), "Prefer": "count=exact"},
+        params={"select": "id", "used": "eq.false", "limit": "1"}
+    )
+    total = int(r2.headers.get("content-range", "0/0").split("/")[-1]) if r2.status_code < 400 else "?"
+    return {"ok": True, "reason": reason, "total": total}
+
+
+async def tool_get_stickers() -> dict:
+    """查看念念的星星贴纸总数和最近记录"""
+    url = f"{SUPABASE_URL}/rest/v1/star_stickers"
+    async with httpx.AsyncClient(timeout=10) as client:
+        # 未使用的总数
+        r_count = await client.get(
+            url,
+            headers={**_supabase_headers(), "Prefer": "count=exact"},
+            params={"select": "id", "used": "eq.false", "limit": "1"}
+        )
+        total = int(r_count.headers.get("content-range", "0/0").split("/")[-1]) if r_count.status_code < 400 else 0
+        # 最近5条记录
+        r_recent = await client.get(
+            url,
+            headers=_supabase_headers(),
+            params={"select": "reason,created_at,used", "order": "created_at.desc", "limit": "5"}
+        )
+    recent = r_recent.json() if r_recent.status_code < 400 else []
+    return {"total": total, "recent": recent}
+
+
+async def tool_redeem_stickers(count: int, reward_type: str = "") -> dict:
+    """念念兑换贴纸奖励"""
+    url = f"{SUPABASE_URL}/rest/v1/star_stickers"
+    async with httpx.AsyncClient(timeout=10) as client:
+        # 查未使用的贴纸
+        r = await client.get(
+            url,
+            headers=_supabase_headers(),
+            params={"select": "id", "used": "eq.false", "order": "created_at.asc", "limit": str(count)}
+        )
+    if r.status_code >= 400:
+        return {"error": f"Supabase {r.status_code}"}
+    rows = r.json()
+    if len(rows) < count:
+        return {"error": f"贴纸不够，当前只有 {len(rows)} 颗，需要 {count} 颗"}
+    # 标记为已使用
+    ids = [row["id"] for row in rows]
+    async with httpx.AsyncClient(timeout=10) as client:
+        for _id in ids:
+            await client.patch(
+                f"{url}?id=eq.{_id}",
+                headers={**_supabase_headers(), "Prefer": "return=minimal"},
+                json={"used": True}
+            )
+    return {"ok": True, "redeemed": count, "reward_type": reward_type or "专属奖励"}
 
 
 async def tool_get_sangli_status() -> dict:
