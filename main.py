@@ -514,6 +514,29 @@ TOOLS = [
         },
         "required": ["count"]
     }
+},
+{
+    "name": "get_niannian_schedule",
+    "description": "查询念念的课表和当前时间段状态。可查今天的课、某一天的课、或当前时间念念在干嘛（上课/课间/空闲）。对话中涉及念念在哪、在干嘛、有没有空时主动调用。",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "weekday": {"type": "integer", "description": "查哪天的课，1=周一…7=周日，留空则查今天"},
+            "current_status": {"type": "boolean", "description": "true=只返回当前时间段状态（上课中/课间/空闲），false=返回全天课表，默认false"}
+        }
+    }
+},
+{
+    "name": "update_niannian_schedule",
+    "description": "更新念念的临时日程。当念念在聊天中提到今天或近期的临时安排变化时调用，比如'今天下午不上课了'、'晚上要去图书馆'。",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "date": {"type": "string", "description": "日期 YYYY-MM-DD，留空则为今天"},
+            "note": {"type": "string", "description": "临时安排的描述，一两句话"}
+        },
+        "required": ["note"]
+    }
 }
 ]
 
@@ -1432,6 +1455,20 @@ async def handle_rpc(payload: dict):
                 result = await tool_redeem_stickers(
                     count=arguments.get("count", 1),
                     reward_type=arguments.get("reward_type", "")
+                )
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]})
+
+            if name == "get_niannian_schedule":
+                result = await tool_get_niannian_schedule(
+                    weekday=arguments.get("weekday"),
+                    current_status=arguments.get("current_status", False)
+                )
+                return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]})
+
+            if name == "update_niannian_schedule":
+                result = await tool_update_niannian_schedule(
+                    note=arguments.get("note", ""),
+                    date=arguments.get("date")
                 )
                 return jsonrpc_result(_id, {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]})
 
@@ -2498,6 +2535,108 @@ async def cleanup_old_mood_logs(days: int = 90) -> dict:
         return {"error": f"Supabase {r.status_code}: {r.text[:100]}"}
     deleted = len(r.json()) if r.text else 0
     return {"deleted_mood_logs": deleted, "older_than_days": days}
+
+
+async def tool_get_niannian_schedule(weekday: int = None, current_status: bool = False) -> dict:
+    """查询念念课表，返回指定天课程或当前时间段状态"""
+    now = datetime.now(SH_TZ)
+    if weekday is None:
+        weekday = now.isoweekday()  # 1=周一 7=周日
+
+    url = f"{SUPABASE_URL}/rest/v1/niannian_schedule"
+    params = {
+        "select": "*",
+        "weekday": f"eq.{weekday}",
+        "order": "start_time.asc"
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(url, headers=_supabase_headers(), params=params)
+        if r.status_code >= 400:
+            return {"error": f"Supabase {r.status_code}"}
+        rows = r.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+    weekday_names = {1:"周一",2:"周二",3:"周三",4:"周四",5:"周五",6:"周六",7:"周日"}
+    day_name = weekday_names.get(weekday, f"周{weekday}")
+
+    if not rows:
+        return {"weekday": day_name, "courses": [], "summary": f"{day_name}没有课"}
+
+    # 当前周次（粗略估算，学期从2026-02-23第一周开始）
+    semester_start = datetime(2026, 2, 23, tzinfo=SH_TZ)
+    current_week = max(1, (now - semester_start).days // 7 + 1)
+
+    # 过滤掉不在当前周次的课
+    active_rows = []
+    for row in rows:
+        wf = row.get("week_from")
+        wt = row.get("week_to")
+        if wf and current_week < wf:
+            continue
+        if wt and current_week > wt:
+            continue
+        active_rows.append(row)
+
+    if not active_rows:
+        return {"weekday": day_name, "courses": [], "summary": f"{day_name}本周没有课（课程已结束或未开始）"}
+
+    courses = [
+        {
+            "course": row["course_name"],
+            "start": str(row["start_time"])[:5],
+            "end": str(row["end_time"])[:5],
+            "location": row.get("location") or ""
+        }
+        for row in active_rows
+    ]
+
+    if current_status and weekday == now.isoweekday():
+        current_time = now.strftime("%H:%M")
+        status = "空闲"
+        current_course = None
+        for row in active_rows:
+            st = str(row["start_time"])[:5]
+            et = str(row["end_time"])[:5]
+            if st <= current_time <= et:
+                status = "上课中"
+                current_course = row["course_name"]
+                break
+            elif current_time < st:
+                status = f"课间/空闲，下一节{row['course_name']}在{st}开始"
+                break
+        return {
+            "weekday": day_name,
+            "current_time": current_time,
+            "status": status,
+            "current_course": current_course,
+            "today_courses": courses
+        }
+
+    return {"weekday": day_name, "courses": courses}
+
+
+async def tool_update_niannian_schedule(note: str, date: str = None) -> dict:
+    """把念念的临时日程存到 notes 表（便签），推送时会读到"""
+    if not note:
+        return {"error": "note 不能为空"}
+    if not date:
+        date = datetime.now(SH_TZ).strftime("%Y-%m-%d")
+    content = f"【{date}临时日程】{note}"
+    url = f"{SUPABASE_URL}/rest/v1/notes"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(
+                url,
+                headers={**_supabase_headers(), "Prefer": "return=minimal"},
+                json={"content": content, "done": False}
+            )
+        if r.status_code >= 400:
+            return {"error": f"Supabase {r.status_code}"}
+        return {"ok": True, "saved": content}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 async def tool_get_phone_status() -> dict:
