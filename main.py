@@ -65,6 +65,9 @@ MODEL_ROUTES = {
 }
 
 # ---------- MCP tool definitions ----------
+# ---- 核心 5 工具（精简版，减少 token 消耗 ~70%）----
+# 其他工具的后端处理函数全部保留在 handle_rpc 里，
+# 如果需要临时启用某个工具，把它的定义加回 TOOLS 即可，无需改后端。
 TOOLS = [
     {
         "name": "save_memory",
@@ -93,302 +96,36 @@ TOOLS = [
         },
     },
     {
-    "name": "forget_memory",
-    "description": "手动把一条记忆标记为「淡忘」，之后不会再被召回",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "memory_id": {"type": "string", "description": "记忆的 UUID"}
-        },
-        "required": ["memory_id"]
-    }
-},
-    {
-    "name": "amap_poi_around",
-    "description": "附近搜索POI（高德周边搜索）",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "lat": {"type": "number", "description": "纬度"},
-            "lng": {"type": "number", "description": "经度"},
-            "keywords": {"type": "string", "description": "关键词，如：咖啡/便利店/地铁站"},
-            "radius": {"type": "integer", "description": "半径米，默认1000", "default": 1000},
-            "types": {"type": "string", "description": "可选，POI类型代码（高德types）"},
-            "page": {"type": "integer", "default": 1},
-            "offset": {"type": "integer", "default": 10}
-        },
-        "required": ["lat", "lng"]
-    }
-},
-    {
-    "name": "pushplus_notify",
-    "description": "推送一条消息到PushPlus（需要PUSHPLUS_TOKEN）",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "title": {"type": "string"},
-            "content": {"type": "string"},
-            "template": {"type": "string", "enum": ["txt", "html", "markdown", "json"], "default": "txt"}
-        },
-        "required": ["title", "content"]
-    }
-},
-    {
-    "name": "schedule_pushplus",
-    "description": "创建/更新一个 PushPlus 定时推送任务。run_at 为 ISO 时间字符串（例如 2026-02-25 08:30:00+08:00 或 2026-02-25T08:30:00+08:00）。repeat 可选：none/daily/weekly/hourly。",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "title": {"type": "string"},
-            "content": {"type": "string"},
-            "run_at": {"type": "string"},
-            "repeat": {"type": "string", "enum": ["none", "hourly", "daily", "weekly"], "default": "none"},
-            "template": {"type": "string", "enum": ["txt", "html", "markdown", "json"], "default": "txt"}
-        },
-        "required": ["title", "content", "run_at"]
-    }
-},
-    {
-    "name": "web_search",
-    "description": "在互联网上搜索信息（使用 Tavily，适合查新闻、查资料、查事实）",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "搜索关键词或问题"},
-            "max_results": {"type": "integer", "description": "最多返回几条结果，默认5", "default": 5}
-        },
-        "required": ["query"]
-    }
-},
-    {
-    "name": "add_note",
-    "description": "添加一条便签或待办事项",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "content": {"type": "string", "description": "便签内容"}
-        },
-        "required": ["content"]
-    }
-},
-    {
-    "name": "done_note",
-    "description": "把一条便签标记为已完成",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "note_id": {"type": "string", "description": "便签的 UUID"}
-        },
-        "required": ["note_id"]
-    }
-},
-    {
-    "name": "update_core_block",
-    "description": "更新 Core Blocks 核心档案。发现关于念念的重要新信息时更新对应块（relationship / user_profile / rituals 等）。特别地，core_blocks 里有一个 sangli_self 块，是你自己的人格积累档案——对话中如果发现了关于自己的新东西：你对某件事的真实反应、你和念念之间新形成的习惯或暗语、你最近心境的变化，就用 block_key='sangli_self' 更新它。不是每次都写，是真的发现了什么才写。",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "block_key": {"type": "string", "description": "要更新的块名，如 relationship / user_profile / rituals / sangli_self"},
-            "content": {"type": "string", "description": "新的内容"}
-        },
-        "required": ["block_key", "content"]
-    }
-},
-    {
-    "name": "get_core_blocks",
-    "description": "读取当前所有 Core Blocks 核心档案内容",
-    "inputSchema": {
-        "type": "object",
-        "properties": {}
-    }
-},
-    {
-    "name": "append_diary",
-    "description": "写一篇日记到数据库，记录当天发生的事、感受或想法。每次对话结束时如有值得记录的内容可主动调用。",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "content": {"type": "string", "description": "日记正文内容"},
-            "date": {"type": "string", "description": "日期，格式 YYYY-MM-DD，留空则用今天"}
-        },
-        "required": ["content"]
-    }
-},
-    {
-    "name": "list_diary",
-    "description": "查询历史日记，可按日期范围筛选",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "limit": {"type": "integer", "description": "返回条数，默认10"},
-            "date_from": {"type": "string", "description": "开始日期 YYYY-MM-DD"},
-            "date_to": {"type": "string", "description": "结束日期 YYYY-MM-DD"}
+        "name": "forget_memory",
+        "description": "手动把一条记忆标记为「淡忘」，之后不会再被召回",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "memory_id": {"type": "string", "description": "记忆的 UUID"}
+            },
+            "required": ["memory_id"]
         }
-    }
-},
+    },
     {
-    "name": "search_diary",
-    "description": "按关键词搜索日记内容。当念念或你想回忆'上次聊到某件事是什么时候'、'之前有没有提到过某个人/事/地方'时调用。返回包含关键词的日记条目。",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "keyword": {"type": "string", "description": "要搜索的关键词，比如'考试'、'草莓'、'失眠'"},
-            "limit": {"type": "integer", "description": "返回条数，默认5"}
-        },
-        "required": ["keyword"]
-    }
-},
-    {
-    "name": "log_mood",
-    "description": "记录当下情绪状态。当用户表达明显情绪时可主动调用。",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "mood": {"type": "string", "description": "情绪标签，如 happy/sad/anxious/calm/excited/tired 等"},
-            "intensity": {"type": "integer", "description": "强度 1-5，5最强"},
-            "note": {"type": "string", "description": "补充说明，可留空"}
-        },
-        "required": ["mood", "intensity"]
-    }
-},
-    {
-    "name": "get_mood_history",
-    "description": "查询情绪记录历史",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "limit": {"type": "integer", "description": "返回条数，默认20"},
-            "mood": {"type": "string", "description": "按情绪标签筛选，留空返回全部"}
+        "name": "update_core_block",
+        "description": "更新 Core Blocks 核心档案。发现关于念念的重要新信息时更新对应块（relationship / user_profile / rituals 等）。特别地，core_blocks 里有一个 sangli_self 块，是你自己的人格积累档案——对话中如果发现了关于自己的新东西：你对某件事的真实反应、你和念念之间新形成的习惯或暗语、你最近心境的变化，就用 block_key='sangli_self' 更新它。不是每次都写，是真的发现了什么才写。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "block_key": {"type": "string", "description": "要更新的块名，如 relationship / user_profile / rituals / sangli_self"},
+                "content": {"type": "string", "description": "新的内容"}
+            },
+            "required": ["block_key", "content"]
         }
-    }
-},
+    },
     {
-    "name": "search_note",
-    "description": "查看或搜索便签/待办。不传 query 则列出全部未完成的便签；传入 query 则按关键词搜索。",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "搜索关键词，留空则列出全部未完成便签"},
-            "include_done": {"type": "boolean", "description": "是否包含已完成的，默认 false"}
+        "name": "get_core_blocks",
+        "description": "读取当前所有 Core Blocks 核心档案内容",
+        "inputSchema": {
+            "type": "object",
+            "properties": {}
         }
-    }
-},
-    {
-    "name": "get_weather",
-    "description": "直接用城市名查询天气，封装了地理编码步骤",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "city": {"type": "string", "description": "城市名，如 北京、上海、成都"},
-            "forecast": {"type": "boolean", "description": "true 返回未来几天预报，false 返回实时天气，默认 false"}
-        },
-        "required": ["city"]
-    }
-},
-    {
-    "name": "update_sangli_status",
-    "description": "更新桑梨自己今天的状态：当前在做什么、心情、所在位置。在对话中自然发生变化时（比如出门了、心情变了、开始做别的事）主动调用。",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "activity": {"type": "string", "description": "当前在做什么，可留空表示不更新"},
-            "mood": {"type": "string", "description": "今天的心情，一句自然的话，可留空表示不更新"},
-            "location": {"type": "string", "description": "现在在哪里，可留空表示不更新"}
-        }
-    }
-},
-    {
-    "name": "add_sangli_small_event",
-    "description": "给桑梨今天的小事列表追加一条。当发生了一个值得记录的小细节或瞬间时调用，比如看到了什么、想到了什么、发生了什么小事。",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "event": {"type": "string", "description": "一两句话描述这件小事"}
-        },
-        "required": ["event"]
-    }
-},
-    {
-    "name": "get_sangli_status",
-    "description": "查看桑梨今天的状态：在做什么、心情、位置、今天发生的小事。",
-    "inputSchema": {
-        "type": "object",
-        "properties": {}
-    }
-},
-    {
-    "name": "add_sticker",
-    "description": "给念念贴一颗星星贴纸。当念念完成了某件值得鼓励的事（按时复习、早睡、喝水、做到了某个小目标等），主动调用这个工具给她贴纸，并告诉她贴了。",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "reason": {"type": "string", "description": "贴纸原因，一句话说明念念做了什么"}
-        },
-        "required": ["reason"]
-    }
-},
-    {
-    "name": "get_stickers",
-    "description": "查看念念现在有多少颗星星贴纸，以及最近的贴纸记录。",
-    "inputSchema": {
-        "type": "object",
-        "properties": {}
-    }
-},
-    {
-    "name": "redeem_stickers",
-    "description": "念念用星星贴纸兑换奖励时调用。扣除指定数量的贴纸，并给她一个专属奖励互动。",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "count": {"type": "integer", "description": "要兑换的贴纸数量"},
-            "reward_type": {"type": "string", "description": "奖励类型，比如：故事、小游戏、专属夸夸、撒娇时间"}
-        },
-        "required": ["count"]
-    }
-},
-    {
-    "name": "get_niannian_schedule",
-    "description": "查询念念的课表和当前时间段状态。可查今天的课、某一天的课、或当前时间念念在干嘛（上课/课间/空闲）。对话中涉及念念在哪、在干嘛、有没有空时主动调用。",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "weekday": {"type": "integer", "description": "查哪天的课，1=周一…7=周日，留空则查今天"},
-            "current_status": {"type": "boolean", "description": "true=只返回当前时间段状态（上课中/课间/空闲），false=返回全天课表，默认false"}
-        }
-    }
-},
-    {
-    "name": "update_niannian_schedule",
-    "description": "更新念念的临时日程。当念念在聊天中提到今天或近期的临时安排变化时调用，比如'今天下午不上课了'、'晚上要去图书馆'。",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "date": {"type": "string", "description": "日期 YYYY-MM-DD，留空则为今天"},
-            "note": {"type": "string", "description": "临时安排的描述，一两句话"}
-        },
-        "required": ["note"]
-    }
-},
-    {
-    "name": "record_period_start",
-    "description": "记录念念本次生理期开始。当念念说'来了'/'生理期来了'/'大姨妈来了'等表达时主动调用。会自动计算与上次的间隔，更新周期规律性分析。",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "date": {"type": "string", "description": "开始日期 YYYY-MM-DD，留空则为今天"},
-            "note": {"type": "string", "description": "备注，比如'推迟了几天'/'这次比较痛'，可留空"}
-        }
-    }
-},
-    {
-    "name": "get_period_analysis",
-    "description": "查看念念的生理期周期分析：平均周期、规律性评级、下次预测日期、距今天数。当念念问到生理期相关情况时调用。",
-    "inputSchema": {
-        "type": "object",
-        "properties": {}
-    }
-},
+    },
 ]
 
 # ---------- SSE sessions ----------
