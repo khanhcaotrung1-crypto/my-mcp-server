@@ -65,7 +65,7 @@ MODEL_ROUTES = {
 }
 
 # ---------- MCP tool definitions ----------
-# ---- 核心 5 工具（精简版，减少 token 消耗 ~70%）----
+# ---- 核心 8 工具（精简版，减少 token 消耗 ~70%）----
 # 其他工具的后端处理函数全部保留在 handle_rpc 里，
 # 如果需要临时启用某个工具，把它的定义加回 TOOLS 即可，无需改后端。
 TOOLS = [
@@ -96,17 +96,6 @@ TOOLS = [
         },
     },
     {
-        "name": "forget_memory",
-        "description": "手动把一条记忆标记为「淡忘」，之后不会再被召回",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "memory_id": {"type": "string", "description": "记忆的 UUID"}
-            },
-            "required": ["memory_id"]
-        }
-    },
-    {
         "name": "update_core_block",
         "description": "更新 Core Blocks 核心档案。发现关于念念的重要新信息时更新对应块（relationship / user_profile / rituals 等）。特别地，core_blocks 里有一个 sangli_self 块，是你自己的人格积累档案——对话中如果发现了关于自己的新东西：你对某件事的真实反应、你和念念之间新形成的习惯或暗语、你最近心境的变化，就用 block_key='sangli_self' 更新它。不是每次都写，是真的发现了什么才写。",
         "inputSchema": {
@@ -119,11 +108,65 @@ TOOLS = [
         }
     },
     {
-        "name": "get_core_blocks",
-        "description": "读取当前所有 Core Blocks 核心档案内容",
+        "name": "add_sticker",
+        "description": "给念念贴一颗星星贴纸。当念念完成了某件值得鼓励的事（按时复习、早睡、喝水、做到了某个小目标等），主动调用这个工具给她贴纸，并告诉她贴了。",
         "inputSchema": {
             "type": "object",
-            "properties": {}
+            "properties": {
+                "reason": {"type": "string", "description": "贴纸原因，一句话说明念念做了什么"}
+            },
+            "required": ["reason"]
+        }
+    },
+    {
+        "name": "update_sangli_status",
+        "description": "更新桑梨自己今天的状态：当前在做什么、心情、所在位置。在对话中自然发生变化时（比如出门了、心情变了、开始做别的事）主动调用。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "activity": {"type": "string", "description": "当前在做什么，可留空表示不更新"},
+                "mood": {"type": "string", "description": "今天的心情，一句自然的话，可留空表示不更新"},
+                "location": {"type": "string", "description": "现在在哪里，可留空表示不更新"}
+            }
+        }
+    },
+    {
+        "name": "add_sangli_small_event",
+        "description": "给桑梨今天的小事列表追加一条。当发生了一个值得记录的小细节或瞬间时调用，比如看到了什么、想到了什么、发生了什么小事。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "event": {"type": "string", "description": "一两句话描述这件小事"}
+            },
+            "required": ["event"]
+        }
+    },
+    {
+        "name": "pushplus_notify",
+        "description": "推送一条消息到PushPlus（需要PUSHPLUS_TOKEN）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "content": {"type": "string"},
+                "template": {"type": "string", "enum": ["txt", "html", "markdown", "json"], "default": "txt"}
+            },
+            "required": ["title", "content"]
+        }
+    },
+    {
+        "name": "schedule_pushplus",
+        "description": "创建/更新一个 PushPlus 定时推送任务。run_at 为 ISO 时间字符串（例如 2026-02-25 08:30:00+08:00 或 2026-02-25T08:30:00+08:00）。repeat 可选：none/daily/weekly/hourly。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "content": {"type": "string"},
+                "run_at": {"type": "string"},
+                "repeat": {"type": "string", "enum": ["none", "hourly", "daily", "weekly"], "default": "none"},
+                "template": {"type": "string", "enum": ["txt", "html", "markdown", "json"], "default": "txt"}
+            },
+            "required": ["title", "content", "run_at"]
         }
     },
 ]
