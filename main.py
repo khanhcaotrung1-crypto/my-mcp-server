@@ -49,7 +49,7 @@ TOOLS = [
     },
     {
         "name": "schedule_pushplus",
-        "description": "创建定时推送任务。run_at 为 ISO 时间字符串（例如 2026-02-2508:30:00+08:00）。repeat可选：none/daily/weekly/hourly。",
+        "description": "创建定时推送任务。run_at 为 ISO 时间字符串（例如 2026-02-25T08:30:00+08:00）。repeat可选：none/daily/weekly/hourly。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -79,14 +79,13 @@ def _supabase_headers():
 # ---------- SSE sessions ----------
 SESSIONS: Dict[str, asyncio.Queue] = {}
 
-
 def sse_data(data: Any) -> str:
     payload = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False)
     return f"data: {payload}\n\n"
 
-
 async def sse_stream(session_id: str):
-    yieldsse_data({"type": "endpoint", "uri": f"message/{session_id}"})
+    # 修复 1: 漏掉了 yield 和 sse_data 之间的空格
+    yield sse_data({"type": "endpoint", "uri": f"message/{session_id}"})
     yield sse_data({"type": "ready", "ok": True})
     q = SESSIONS[session_id]
     while True:
@@ -95,7 +94,6 @@ async def sse_stream(session_id: str):
             yield sse_data(msg)
         except asyncio.TimeoutError:
             yield sse_data({"type": "ping", "t": datetime.now().isoformat()})
-
 
 @app.api_route("/mcp", methods=["GET", "POST"])
 async def mcp_entry(request: Request):
@@ -121,11 +119,11 @@ async def mcp_entry(request: Request):
     SESSIONS[session_id] = asyncio.Queue()
     return JSONResponse({"type": "endpoint", "uri": f"message/{session_id}", "ok": True})
 
-
 @app.post("/mcp/message/{session_id}")
 @app.post("/message/{session_id}")
 async def handle_message(session_id: str, request: Request):
-    if session_id not in SESSIONS:SESSIONS[session_id] = asyncio.Queue()
+    if session_id not in SESSIONS:
+        SESSIONS[session_id] = asyncio.Queue()
     try:
         payload = await request.json()
     except Exception:
@@ -136,24 +134,19 @@ async def handle_message(session_id: str, request: Request):
     await SESSIONS[session_id].put(resp)
     return JSONResponse({"ok": True})
 
-
 @app.get("/")
 def root():
     return {"status": "ok"}
 
-
 @app.get("/health")
 def health():
     return {"status": "ok", "tools": [t["name"] for t in TOOLS]}
-
-
 # ---------- JSON-RPC ----------
 def jsonrpc_result(_id, result):
     return {"jsonrpc": "2.0", "id": _id, "result": result}
 
 def jsonrpc_error(_id, code, message):
     return {"jsonrpc": "2.0", "id": _id, "error": {"code": code, "message": message}}
-
 
 async def handle_rpc(payload: dict):
     _id = payload.get("id")
@@ -202,7 +195,6 @@ async def handle_rpc(payload: dict):
 
     return jsonrpc_error(_id, -32601, f"Method not found: {method}")
 
-
 # ---------- PushPlus ----------
 async def pushplus_notify(title: str, content: str, template: str = "txt"):
     if not PUSHPLUS_TOKEN:
@@ -214,7 +206,6 @@ async def pushplus_notify(title: str, content: str, template: str = "txt"):
         })
         r.raise_for_status()
         return r.json()
-
 
 # ---------- 定时推送 ----------
 import re
@@ -251,7 +242,6 @@ def _next_run_iso(prev_run_iso: str, repeat: str, now_iso_utc: str) -> Optional[
         return None
     return cand.astimezone(timezone.utc).isoformat()
 
-
 async def create_push_schedule(*, title: str, content: str, run_at: str, repeat: str = "none") -> dict:
     payload = {
         "title": title, "content": content,
@@ -265,7 +255,6 @@ async def create_push_schedule(*, title: str, content: str, run_at: str, repeat:
         rows = r.json()
         return rows[0] if rows else payload
 
-
 # ---------- 定时任务：每分钟触发 ----------
 async def run_due_push_schedules() -> dict:
     now_utc = datetime.now(timezone.utc).replace(microsecond=0)
@@ -274,15 +263,18 @@ async def run_due_push_schedules() -> dict:
         async with httpx.AsyncClient(timeout=30) as client:
             r = await client.get(
                 f"{SUPABASE_URL}/rest/v1/push_schedules",
-                headers=_supabase_headers(),params={
+                headers=_supabase_headers(),
+                params={
                     "select": "*", "enabled": "eq.true",
                     "run_at": f"lte.{now_iso}",
                     "or": "(status.eq.pending,status.is.null)",
                     "order": "run_at.asc", "limit": "50",
                 },
-            )if r.status_code >= 400:
-            return {"ok": False, "error": f"fetch {r.status_code}"}
-        jobs = r.json() or []
+            )
+            # 修复 2: 修正了 if 语法和缩进
+            if r.status_code >= 400:
+                return {"ok": False, "error": f"fetch {r.status_code}"}
+            jobs = r.json() or []
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -295,7 +287,10 @@ async def run_due_push_schedules() -> dict:
             await pushplus_notify(title=job.get("title", "提醒"), content=job.get("content", ""))
             sent += 1
         except Exception:
-            continuerepeat = (job.get("repeat") or "none").lower()
+            # 修复 3: 把连续写在一起的 continuerepeat 拆开
+            continue
+        
+        repeat = (job.get("repeat") or "none").lower()
         patch: Dict[str, Any] = {"last_run_at": now_iso, "last_error": None}
         if repeat != "none":
             next_run = _next_run_iso(job.get("run_at", now_iso), repeat, now_iso)
@@ -309,20 +304,4 @@ async def run_due_push_schedules() -> dict:
             async with httpx.AsyncClient(timeout=10) as client:
                 await client.patch(
                     f"{SUPABASE_URL}/rest/v1/push_schedules?id=eq.{job_id}",
-                    headers={**_supabase_headers(), "Prefer": "return=minimal"},
-                    json=patch,
-                )
-        except Exception:
-            pass
-
-    return {"ok": True, "checked": len(jobs), "sent": sent}
-
-
-@app.get("/cron/tick")
-async def cron_tick(request: Request):
-    if CRON_SECRET:
-        auth = request.headers.get("Authorization", "")
-        token = auth.removeprefix("Bearer ").strip()
-        if token != CRON_SECRET:
-            raise HTTPException(status_code=401, detail="bad secret")
-    return await run_due_push_schedules()
+                    headers={**_supabase_
